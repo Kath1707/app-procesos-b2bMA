@@ -283,17 +283,31 @@ elif st.session_state.paso == 2:
     st.subheader("2. Producto y actividad a registrar")
     producto = st.selectbox("Producto", productos, key="form_producto")
 
-    actividades_producto = matriz[matriz["producto"] == producto]
-    opciones_actividad = actividades_producto["actividad"].tolist()
-    actividad = st.selectbox(
+    actividades_producto = matriz[matriz["producto"] == producto].reset_index(drop=True)
+    # Etiqueta unica por fila: "ACTIVIDAD — sub-componente" cuando la actividad
+    # se repite dentro del mismo producto (ej. "DOSIFICADO" en varios rellenos),
+    # para no confundir a que sub-proceso corresponde cada registro.
+    conteo_actividad = actividades_producto["actividad"].value_counts()
+    etiquetas = []
+    for _, r in actividades_producto.iterrows():
+        if conteo_actividad[r["actividad"]] > 1 and pd.notna(r.get("sub_producto")):
+            etiquetas.append(f"{r['actividad']} — {r['sub_producto']}")
+        else:
+            etiquetas.append(r["actividad"])
+    actividades_producto["_etiqueta"] = etiquetas
+
+    etiqueta_sel = st.selectbox(
         "Actividad / etapa del proceso (solo se registra UNA por sesion)",
-        opciones_actividad, key="form_actividad",
+        actividades_producto["_etiqueta"].tolist(), key="form_actividad",
     )
 
-    fila_sel = actividades_producto[actividades_producto["actividad"] == actividad].iloc[0]
+    fila_sel = actividades_producto[actividades_producto["_etiqueta"] == etiqueta_sel].iloc[0]
     st.session_state.form_fila = fila_sel.to_dict()
 
-    st.caption(f"Linea HACCP: {fila_sel['linea_haccp']}  |  Tipo: {fila_sel.get('tipo_producto', '-')}")
+    st.caption(
+        f"Linea HACCP: {fila_sel['linea_haccp']}  |  Tipo: {fila_sel.get('tipo_producto', '-')}  |  "
+        f"Sub-componente: {fila_sel.get('sub_producto', '-')}"
+    )
 
     habilitados = parametros_habilitados(fila_sel)
     if habilitados:
@@ -368,7 +382,7 @@ elif st.session_state.paso == 3:
             st.session_state.paso = 4
             st.rerun()
 
-# ---- Paso 4: registro de parametros -------------------------------------
+# ---- Paso 4: registro de parametros (solo CONFORME / NO CONFORME) -------
 elif st.session_state.paso == 4:
     st.subheader("4. Registro de parametros de control")
     fila_sel = pd.Series(st.session_state.form_fila)
@@ -377,49 +391,33 @@ elif st.session_state.paso == 4:
 
     if not habilitados:
         st.info("No hay parametros que registrar para esta actividad; puedes continuar.")
+    else:
+        st.caption(
+            "Compara la medicion/observacion fisica contra la especificacion de "
+            "la matriz y marca el resultado. No se ingresa el valor medido, "
+            "solo el veredicto."
+        )
 
-    valores = {}  # clave -> lista de valores por muestra
-    conformidades = {}  # clave -> lista de bool/None por muestra
+    conformidades = {}  # clave -> lista de bool por muestra
 
     MUESTRAS_POR_FILA = 6  # evita columnas demasiado angostas cuando n_muestras es grande
 
-    for clave, etiqueta, tipo, spec in habilitados:
+    for clave, etiqueta, _tipo, spec in habilitados:
         st.markdown(f"**{etiqueta}**  ·  especificacion: `{spec}`")
-        vals_param = []
         conf_param = []
         for inicio in range(0, n_muestras, MUESTRAS_POR_FILA):
             indices_fila = list(range(inicio, min(inicio + MUESTRAS_POR_FILA, n_muestras)))
             cols = st.columns(len(indices_fila))
             for col, i in zip(cols, indices_fila):
                 with col:
-                    label_muestra = f"Muestra {i + 1}" if n_muestras > 1 else "Valor"
-                    if tipo == "numeric":
-                        v = st.number_input(
-                            label_muestra, key=f"form_{clave}_{i}", format="%.2f",
-                            step=0.1,
-                        )
-                        conforme = evaluar_conformidad(v, spec)
-                    else:
-                        v = st.text_input(label_muestra, key=f"form_{clave}_{i}")
-                        auto = evaluar_conformidad(v, spec)
-                        if auto is None:
-                            conforme_manual = st.selectbox(
-                                "Conforme?", ["Conforme", "No conforme"],
-                                key=f"form_{clave}_conf_{i}",
-                            )
-                            conforme = conforme_manual == "Conforme"
-                        else:
-                            conforme = auto
-                    vals_param.append(v)
-                    conf_param.append(conforme)
-                    if conforme is False:
-                        st.error("No conforme")
-                    elif conforme is True:
-                        st.success("Conforme")
-        valores[clave] = vals_param
+                    label_muestra = f"Muestra {i + 1}" if n_muestras > 1 else "Resultado"
+                    resultado = st.radio(
+                        label_muestra, ["Conforme", "No conforme"],
+                        key=f"form_{clave}_{i}", horizontal=False,
+                    )
+                    conf_param.append(resultado == "Conforme")
         conformidades[clave] = conf_param
 
-    st.session_state.form_valores = valores
     st.session_state.form_conformidades = conformidades
 
     c1, c2 = st.columns(2)
@@ -470,7 +468,6 @@ elif st.session_state.paso == 5:
                 st.error("Ingresa el responsable de calidad antes de guardar.")
             else:
                 fila_sel = st.session_state.form_fila
-                valores = st.session_state.form_valores
                 conformidades = st.session_state.form_conformidades
                 n_muestras = st.session_state.form_n_muestras
 
@@ -483,6 +480,7 @@ elif st.session_state.paso == 5:
                     "area": st.session_state.form_area,
                     "cliente": st.session_state.form_cliente,
                     "producto": fila_sel["producto"],
+                    "sub_componente": fila_sel.get("sub_producto"),
                     "actividad": fila_sel["actividad"],
                     "linea_haccp": fila_sel["linea_haccp"],
                     "aplica_batch": st.session_state.form_aplica_batch,
@@ -498,10 +496,7 @@ elif st.session_state.paso == 5:
                     "conforme_general": not cualquier_no_conforme,
                     "registrado_en": datetime.now(),
                 }
-                # aplanar muestras: peso_1, peso_2, peso_3, ...
-                for clave, lst in valores.items():
-                    for i, v in enumerate(lst, start=1):
-                        registro[f"{clave}_{i}"] = v
+                # aplanar resultados: peso_1_conforme, peso_2_conforme, ...
                 for clave, lst in conformidades.items():
                     for i, c in enumerate(lst, start=1):
                         registro[f"{clave}_{i}_conforme"] = c

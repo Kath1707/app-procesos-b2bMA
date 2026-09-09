@@ -42,7 +42,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Control de Productos en Proceso", layout="wide")
 
-MASTER_XLSX_PATH = "MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx"  # subir al repo junto al app.py
+MASTER_XLSX_PATH = "data/MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx"  # subir al repo junto al app.py
 MASTER_SHEET = "PROCESO-B2B-STB"
 
 # Nombre interno -> etiqueta visible + si requiere spec numerica o es texto/checklist

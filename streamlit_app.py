@@ -1,7 +1,7 @@
 """
 App de Registro de Parámetros de Calidad - Producto Intermedio (PI) B2B Starbucks
 ====================================================================================
-Streamlit. Por ahora SIN conexión a Google Sheets (solo exportación local CSV/Excel).
+Streamlit + Google Drive/Sheets (histórico mensual, una hoja por día+turno).
 
 Estructura esperada del repo (el Excel de especificaciones va al MISMO NIVEL que
 este archivo y que requirements.txt, no dentro de una carpeta "data/"):
@@ -9,6 +9,13 @@ este archivo y que requirements.txt, no dentro de una carpeta "data/"):
   streamlit_app_pi.py
   requirements.txt
   MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx
+
+Secrets necesarios en Streamlit Cloud (Manage app -> Settings -> Secrets):
+
+[gcp_service_account]
+... (mismo bloque que en la app de PT) ...
+
+ROOT_FOLDER_ID = "1h46IR2nUS8TZUSIgl1lD-M4nCtp-p_wW"
 """
 
 import io
@@ -17,6 +24,14 @@ from datetime import date
 
 import pandas as pd
 import streamlit as st
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build as build_drive_service
+    GSHEETS_DISPONIBLE = True
+except ImportError:
+    GSHEETS_DISPONIBLE = False
 
 # ----------------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
@@ -31,7 +46,18 @@ EXCEL_PATH = "MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx"  # mismo nivel que este 
 SHEET_NAME = "PROCESO-B2B-STB"
 CLIENTE_FIJO = "STARBUCKS"
 AREA_FIJA = "EMPAQUE"
-MAX_MUESTRAS_COLUMNAS = 8  # sub-columnas fijas preparadas por parámetro en el exportable
+MAX_MUESTRAS_COLUMNAS = 6  # igual que la plantilla de Google Sheets (Muestra 1 a 6)
+
+SUBCARPETA_DRIVE = "Productos Intermedios"
+PLANTILLA_NOMBRE = "Proceso PI - Plantilla Base"
+PLANTILLA_HOJA = "Hoja 1"
+FOOTER_MARCA = "V°B° Jefe de Calidad"
+FILA_ENCABEZADO_PLANTILLA = 6  # fila 5-6 = encabezado con sub-columnas Muestra 1..6
+
+MESES_ES = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+    7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+}
 
 EQUIPO_CALIDAD = [
     "Verónica Iriarte",
@@ -59,12 +85,20 @@ ALL_PARAM_DEFS = [
     ("observacion", "Observación/Corrección"),
 ]
 
+# Encabezados EXACTOS de la plantilla de Google Sheets (sin Turno/Batch/Letra código)
+HEADERS_SHEET_FIJOS = ["Fecha", "Cliente", "Área", "Línea HACCP", "Producto", "Componente", "Actividad", "N° de muestras"]
+HEADERS_SHEET_FINALES = ["Conclusión", "Iniciales"]
+
 
 def iniciales(nombre_completo: str) -> str:
     partes = nombre_completo.strip().split()
     if len(partes) < 2:
         return nombre_completo[:2].upper()
     return (partes[0][0] + partes[-1][0]).upper()
+
+
+def nombre_mes_es(fecha: date) -> str:
+    return f"{MESES_ES[fecha.month]} {fecha.year}"
 
 
 # ----------------------------------------------------------------------------
@@ -167,6 +201,124 @@ def get_excel_bytes():
         if up is not None:
             return up.read()
         st.stop()
+
+
+# ----------------------------------------------------------------------------
+# CONEXIÓN A GOOGLE DRIVE / SHEETS
+# ----------------------------------------------------------------------------
+def get_gsheet_client_and_drive():
+    if not GSHEETS_DISPONIBLE:
+        return None, None
+    try:
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        gc = gspread.authorize(creds)
+        drive = build_drive_service("drive", "v3", credentials=creds)
+        return gc, drive
+    except Exception:
+        return None, None
+
+
+def _buscar_archivo_en_carpeta(drive, nombre: str, carpeta_id: str, es_carpeta: bool = False):
+    """Busca por nombre exacto dentro de una carpeta. Devuelve el ID o None."""
+    tipo_mime = "application/vnd.google-apps.folder" if es_carpeta else "application/vnd.google-apps.spreadsheet"
+    query = (
+        f"name = '{nombre}' and '{carpeta_id}' in parents "
+        f"and mimeType = '{tipo_mime}' and trashed = false"
+    )
+    resultado = drive.files().list(q=query, fields="files(id, name)").execute()
+    archivos = resultado.get("files", [])
+    return archivos[0]["id"] if archivos else None
+
+
+def get_or_create_month_spreadsheet_id(drive, root_folder_id: str, fecha: date) -> str:
+    """Devuelve el ID del Google Sheets del mes correspondiente, creándolo si no existe."""
+    subcarpeta_id = _buscar_archivo_en_carpeta(drive, SUBCARPETA_DRIVE, root_folder_id, es_carpeta=True)
+    if subcarpeta_id is None:
+        raise RuntimeError(f"No encontré la subcarpeta '{SUBCARPETA_DRIVE}' dentro de la carpeta raíz.")
+
+    nombre_mes = nombre_mes_es(fecha)
+    archivo_mes_id = _buscar_archivo_en_carpeta(drive, nombre_mes, subcarpeta_id)
+    if archivo_mes_id:
+        return archivo_mes_id
+
+    plantilla_id = _buscar_archivo_en_carpeta(drive, PLANTILLA_NOMBRE, subcarpeta_id)
+    if plantilla_id is None:
+        raise RuntimeError(
+            f"No encontré la plantilla '{PLANTILLA_NOMBRE}' dentro de '{SUBCARPETA_DRIVE}'."
+        )
+
+    copia = drive.files().copy(
+        fileId=plantilla_id,
+        body={"name": nombre_mes, "parents": [subcarpeta_id]},
+    ).execute()
+    return copia["id"]
+
+
+def _encontrar_fila_footer(ws) -> int | None:
+    valores = ws.get_all_values()
+    for idx, fila in enumerate(valores, start=1):
+        if fila and fila[0].strip().upper().startswith(FOOTER_MARCA.upper()):
+            return idx
+        # el marcador puede no estar en la columna A si se corrió por el merge
+        for celda in fila:
+            if celda.strip().upper().startswith(FOOTER_MARCA.upper()):
+                return idx
+    return None
+
+
+def get_or_create_daily_worksheet(spreadsheet, fecha: date, turno: str):
+    """Abre (o crea, duplicando la plantilla) la pestaña del día + turno."""
+    titulo_hoja = f"{fecha.strftime('%Y-%m-%d')} {turno}"
+    try:
+        return spreadsheet.worksheet(titulo_hoja)
+    except gspread.exceptions.WorksheetNotFound:
+        pass
+
+    plantilla = spreadsheet.worksheet(PLANTILLA_HOJA)
+    ws = spreadsheet.duplicate_sheet(source_sheet_id=plantilla.id, new_sheet_name=titulo_hoja)
+
+    fila_footer = _encontrar_fila_footer(ws)
+    primera_fila_datos = FILA_ENCABEZADO_PLANTILLA + 1
+    if fila_footer and fila_footer > primera_fila_datos:
+        ws.delete_rows(primera_fila_datos, fila_footer - 1)
+
+    return ws
+
+
+def guardar_en_google_sheets(fila_valores: list) -> tuple:
+    """Guarda una fila en la hoja del día+turno correspondiente, dentro del Sheets del mes."""
+    gc, drive = get_gsheet_client_and_drive()
+    if gc is None or drive is None:
+        return False, "No se pudo conectar a Google Drive/Sheets (revisa los Secrets configurados)."
+    try:
+        root_folder_id = st.secrets.get("ROOT_FOLDER_ID")
+        if not root_folder_id:
+            return False, "No se encontró ROOT_FOLDER_ID en los Secrets."
+
+        fecha = st.session_state.fecha_produccion
+        turno = st.session_state.turno
+
+        spreadsheet_id = get_or_create_month_spreadsheet_id(drive, root_folder_id, fecha)
+        spreadsheet = gc.open_by_key(spreadsheet_id)
+        ws = get_or_create_daily_worksheet(spreadsheet, fecha, turno)
+
+        fila_footer = _encontrar_fila_footer(ws)
+        if fila_footer is None:
+            ws.append_rows([fila_valores])
+        else:
+            ws.insert_rows([fila_valores], row=fila_footer)
+
+        return True, (
+            f"Guardado en '{nombre_mes_es(fecha)}' → hoja "
+            f"'{fecha.strftime('%Y-%m-%d')} {turno}'."
+        )
+    except Exception as e:
+        return False, f"Error al guardar en Google Sheets: {e}"
 
 
 # ----------------------------------------------------------------------------
@@ -326,6 +478,12 @@ elif st.session_state.step == 5:
             f"**n = {n_muestras}** muestras. Criterio: Aceptar con **{ac}** o menos no conformes, "
             f"Rechazar con **{re_}** o más."
         )
+        if n_muestras > MAX_MUESTRAS_COLUMNAS:
+            st.warning(
+                f"⚠️ El historial en Google Sheets solo tiene espacio hasta Muestra "
+                f"{MAX_MUESTRAS_COLUMNAS}. Se guardarán solo las primeras {MAX_MUESTRAS_COLUMNAS} "
+                f"muestras en el Sheets (el CSV/Excel descargable sí tendrá las {n_muestras} completas)."
+            )
     else:
         batch_size = None
         letra, n_muestras, ac, re_ = None, 1, None, None
@@ -528,8 +686,41 @@ elif st.session_state.step == 8:
 
     export_df = pd.DataFrame([fila_export])
 
-    with st.expander("Ver la fila completa que se exportará"):
+    with st.expander("Ver la fila completa que se exportará (CSV/Excel local)"):
         st.dataframe(export_df, use_container_width=True, hide_index=True)
+
+    # ------------------------------------------------------------------
+    # Fila EXACTA para el historial en Google Sheets (sin Turno/Batch/Letra
+    # código, recortada a MAX_MUESTRAS_COLUMNAS, igual que la plantilla)
+    # ------------------------------------------------------------------
+    fila_sheet = [
+        st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
+        CLIENTE_FIJO,
+        AREA_FIJA,
+        st.session_state.linea_haccp,
+        st.session_state.producto,
+        fila["componente"],
+        fila["actividad"],
+        n,
+    ]
+    for clave, _ in ALL_PARAM_DEFS:
+        valores_muestra = (
+            [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
+            if clave in claves_activas else []
+        )
+        for i in range(MAX_MUESTRAS_COLUMNAS):
+            fila_sheet.append(valores_muestra[i] if i < len(valores_muestra) else "")
+    fila_sheet.append(st.session_state.conclusion)
+    fila_sheet.append(iniciales(st.session_state.responsable))
+
+    st.divider()
+    st.subheader("Guardar historial")
+    if st.button("💾 Guardar en Google Sheets (historial)", type="primary"):
+        exito, mensaje = guardar_en_google_sheets(fila_sheet)
+        if exito:
+            st.success(mensaje)
+        else:
+            st.error(mensaje)
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
     excel_buffer = io.BytesIO()

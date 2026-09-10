@@ -1,554 +1,563 @@
 """
-Registro de Control de Productos en Proceso (B2B)
---------------------------------------------------
-App Streamlit para registrar, por PRODUCTO y ACTIVIDAD (1 registro = 1 actividad),
-los parametros de control habilitados segun la matriz de especificaciones
-(hoja PROCESO-B2B-STB del Excel MA-PL-019), siguiendo el formato de
-"CONTROL PRODUCTOS EN PROCESO" (MA-FR-030).
+App de Registro de Parámetros de Calidad - Producto Intermedio (PI) B2B Starbucks
+====================================================================================
+Streamlit. Por ahora SIN conexión a Google Sheets (solo exportación local CSV/Excel).
 
-Reglas clave:
-- Un registro = un producto + una actividad (no se mezclan actividades).
-- Solo se piden los parametros que la matriz tiene habilitados para esa
-  actividad especifica (si en el Excel el valor es "-" o esta vacio, el
-  parametro no se pide).
-- Antes de pedir muestras, se pregunta si la actividad considera BATCH:
-    - Si aplica batch -> se pide el tamaño del lote y el numero de muestras
-      se calcula con MIL-STD-105E, Nivel de Inspeccion Especial S-2,
-      Tabla 2B (inspeccion rigurosa/tightened), AQL 4.0%.
-    - Si no aplica batch -> se registra 1 sola muestra general.
-- Se evalua conforme / no conforme comparando contra la especificacion
-  cuando esta es numerica (ej "75 +/- 5", "7 a 7.5", "0 - 4"); si la
-  especificacion es textual (ej "LIBRE DE MATERIAL EXTRAÑO") se marca
-  conforme/no conforme de forma manual.
-- Cada registro guardado se acumula en un HISTORIAL (tabla de muestras)
-  descargable en Excel/CSV con el mismo esqueleto de columnas de MA-FR-030.
+Estructura esperada del repo (el Excel de especificaciones va al MISMO NIVEL que
+este archivo y que requirements.txt, no dentro de una carpeta "data/"):
 
-Requisitos: streamlit, pandas, openpyxl, xlsxwriter
-    pip install streamlit pandas openpyxl xlsxwriter
-Ejecutar:
-    streamlit run app.py
+  streamlit_app_pi.py
+  requirements.txt
+  MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx
 """
 
-import re
 import io
-from datetime import date, datetime
+import re
+from datetime import date
 
 import pandas as pd
 import streamlit as st
 
-# --------------------------------------------------------------------------
-# CONFIGURACION GENERAL
-# --------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# CONFIGURACIÓN GENERAL
+# ----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Registro de Calidad - Producto Intermedio B2B Starbucks",
+    page_icon="🧪",
+    layout="wide",
+)
 
-st.set_page_config(page_title="Control de Productos en Proceso", layout="wide")
+EXCEL_PATH = "MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx"  # mismo nivel que este .py
+SHEET_NAME = "PROCESO-B2B-STB"
+CLIENTE_FIJO = "STARBUCKS"
+AREA_FIJA = "EMPAQUE"
+MAX_MUESTRAS_COLUMNAS = 8  # sub-columnas fijas preparadas por parámetro en el exportable
 
-MASTER_XLSX_PATH = "MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx"  # subir al repo junto al app.py
-MASTER_SHEET = "PROCESO-B2B-STB"
-
-# Nombre interno -> etiqueta visible + si requiere spec numerica o es texto/checklist
-PARAM_DEFS = [
-    ("peso",          "Peso (g)",                         "numeric"),
-    ("diametro",      "Diametro (cm)",                     "numeric"),
-    ("altura",        "Altura / Espesor (cm)",              "numeric"),
-    ("temperatura",   "Temperatura (C)",                    "numeric"),
-    ("tamizado",      "Tamizado",                           "text"),
-    ("tiempo_mezcla", "Tiempo de mezcla (min)",              "numeric"),
-    ("decorado",      "Decorado / detalle de forma",         "text"),
-    ("brix",          "Brix",                               "numeric"),
-    ("organolepticas","Caracteristicas organolepticas",      "text"),
+EQUIPO_CALIDAD = [
+    "Verónica Iriarte",
+    "Cristina Merino",
+    "Lisseth Aspíllaga",
+    "Sandra Chavez",
+    "Alejandro Herrera",
+    "Katherin Hidalgo",
 ]
 
-# --------------------------------------------------------------------------
-# MIL-STD-105E — Nivel de Inspeccion Especial S-2 / Tabla 2B (rigurosa) / AQL 4.0%
-# --------------------------------------------------------------------------
+TURNOS = ["Día", "Tarde", "Madrugada"]
 
-# Rangos de tamaño de lote -> letra codigo, columna Nivel Especial S-2
-# (tabla general de letras codigo de MIL-STD-105E)
-LETRA_CODIGO_S2 = [
-    (2, 8, "A"),
-    (9, 15, "A"),
-    (16, 25, "A"),
-    (26, 50, "B"),
-    (51, 90, "B"),
-    (91, 150, "B"),
-    (151, 280, "C"),
-    (281, 500, "C"),
-    (501, 1200, "C"),
-    (1201, 3200, "D"),
-    (3201, 10000, "D"),
-    (10001, 35000, "D"),
-    (35001, 150000, "E"),
-    (150001, 500000, "E"),
-    (500001, float("inf"), "E"),
+# (clave, etiqueta) en el orden fijo que tendrán las columnas del exportable
+ALL_PARAM_DEFS = [
+    ("peso", "Peso (g)"),
+    ("diametro", "Diámetro (cm)"),
+    ("altura", "Altura/Espesor (cm)"),
+    ("temperatura", "Temperatura (°C)"),
+    ("tamizado", "Tamizado"),
+    ("tiempo_mezcla", "Tiempo Mezcla (min)"),
+    ("decorado", "Decorado"),
+    ("brix", "Brix"),
+    ("organolepticas", "Características Organolépticas"),
+    ("estado_material", "Estado del Material/Equipo/Herramienta"),
+    ("observacion", "Observación/Corrección"),
 ]
 
-# Tamaño de muestra por letra codigo (Tabla II — igual para normal/rigurosa/reducida)
-TAMANO_MUESTRA_POR_LETRA = {
-    "A": 2, "B": 3, "C": 5, "D": 8, "E": 13, "F": 20, "G": 32, "H": 50,
-    "J": 80, "K": 125, "L": 200, "M": 315, "N": 500, "P": 800, "Q": 1250, "R": 2000,
-}
 
-# Ac/Re (aceptacion/rechazo) para inspeccion RIGUROSA (Tabla 2B), AQL 4.0%
-# "-" indica que a esa letra le corresponde usar el plan de la siguiente flecha
-# hacia abajo (segun la tabla original); aqui se deja el plan efectivo ya resuelto
-# para las letras que puede producir S-2 (A-E).
-AC_RE_RIGUROSA_AQL_4_0 = {
-    "A": (0, 1),
-    "B": (0, 1),
-    "C": (0, 1),
-    "D": (1, 2),
-    "E": (1, 2),
-}
+def iniciales(nombre_completo: str) -> str:
+    partes = nombre_completo.strip().split()
+    if len(partes) < 2:
+        return nombre_completo[:2].upper()
+    return (partes[0][0] + partes[-1][0]).upper()
 
 
-def calcular_muestreo_mil_std_105e(tamano_lote: int):
-    """Devuelve (letra_codigo, n_muestras, ac, re) para Nivel S-2,
-    Tabla 2B (rigurosa), AQL 4.0%, segun el tamaño de lote (batch)."""
-    letra = None
-    for low, high, l in LETRA_CODIGO_S2:
-        if low <= tamano_lote <= high:
-            letra = l
-            break
-    if letra is None:
-        letra = "E"
-    n = TAMANO_MUESTRA_POR_LETRA[letra]
-    ac, re = AC_RE_RIGUROSA_AQL_4_0[letra]
-    return letra, n, ac, re
+# ----------------------------------------------------------------------------
+# TABLA MIL-STD-105E - Nivel de Inspección Especial S-2, Inspección Rigurosa
+# (Tightened, Tabla II-B), AQL 4.0% — misma tabla que usamos en la app de PT
+# ----------------------------------------------------------------------------
+SAMPLING_TABLE_S2 = [
+    (2, 8, "A", 2, 0, 1),
+    (9, 15, "A", 2, 0, 1),
+    (16, 25, "B", 3, 0, 1),
+    (26, 50, "B", 3, 0, 1),
+    (51, 90, "B", 3, 0, 1),
+    (91, 150, "C", 5, 0, 1),
+    (151, 280, "C", 5, 0, 1),
+    (281, 500, "C", 5, 0, 1),
+    (501, 1200, "D", 8, 1, 2),
+    (1201, 3200, "D", 8, 1, 2),
+    (3201, 10000, "D", 8, 1, 2),
+    (10001, 35000, "E", 13, 1, 2),
+    (35001, 150000, "E", 13, 1, 2),
+    (150001, 10_000_000, "E", 13, 1, 2),
+]
 
 
-COL_MAP = {
-    # columna Excel (indice 0-based dentro de la fila) -> clave interna
-    0: "producto", 1: "linea_producto", 2: "linea_haccp", 3: "sub_producto",
-    4: "actividad", 5: "tipo_producto",
-    6: "peso", 7: "diametro", 8: "altura", 9: "temperatura", 10: "tamizado",
-    11: "tiempo_mezcla", 12: "decorado", 13: "brix", 14: "organolepticas",
-    15: "estado_material", 16: "responsable", 17: "correccion_ref",
-}
+def get_sample_size(lot_size: int):
+    for low, high, letter, n, ac, re_ in SAMPLING_TABLE_S2:
+        if low <= lot_size <= high:
+            return letter, n, ac, re_
+    if lot_size < 2:
+        return "A", 2, 0, 1
+    return "E", 13, 1, 2
 
 
-# --------------------------------------------------------------------------
-# CARGA Y PARSEO DE LA MATRIZ MAESTRA
-# --------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# CARGA Y LIMPIEZA DE DATOS DEL EXCEL
+# ----------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_specs(excel_bytes: bytes) -> pd.DataFrame:
+    df_raw = pd.read_excel(
+        io.BytesIO(excel_bytes),
+        sheet_name=SHEET_NAME,
+        header=None,
+        skiprows=7,
+    )
 
-@st.cache_data
-def cargar_matriz(path: str) -> pd.DataFrame:
-    """Lee la hoja PROCESO-B2B-STB, hace forward-fill de las columnas
-    fusionadas (producto, linea, linea_haccp) y devuelve un registro
-    por fila = producto + actividad."""
-    raw = pd.read_excel(path, sheet_name=MASTER_SHEET, header=None, skiprows=7)
-    filas = []
-    cur_producto = cur_linea_producto = cur_linea_haccp = None
-    for _, row in raw.iterrows():
-        vals = row.tolist()
-        if not any(pd.notna(v) for v in vals[:18]):
-            continue
-        if pd.notna(vals[0]):
-            cur_producto = vals[0]
-        if pd.notna(vals[1]):
-            cur_linea_producto = vals[1]
-        if pd.notna(vals[2]):
-            cur_linea_haccp = vals[2]
-        if pd.isna(vals[4]):  # sin actividad -> fila vacia de relleno
-            continue
-        registro = {"producto": cur_producto, "linea_producto": cur_linea_producto,
-                    "linea_haccp": cur_linea_haccp}
-        for idx, clave in COL_MAP.items():
-            if clave in ("producto", "linea_producto", "linea_haccp"):
-                continue
-            registro[clave] = vals[idx] if idx < len(vals) else None
-        filas.append(registro)
-    return pd.DataFrame(filas)
+    cols = [
+        "producto", "linea_produccion", "linea_haccp", "componente", "actividad",
+        "tipo", "peso", "diametro", "altura", "temperatura", "tamizado",
+        "tiempo_mezcla", "decorado", "brix", "organolepticas", "estado_material",
+        "responsable", "observacion",
+    ]
+    df_raw = df_raw.iloc[:, : len(cols)]
+    df_raw.columns = cols
 
+    # Solo nos quedamos con filas que tengan actividad (evita filas totalmente vacías)
+    df_raw = df_raw[df_raw["actividad"].notna()].copy()
 
-def parametros_habilitados(fila: pd.Series):
-    """Devuelve la lista de (clave, etiqueta, tipo, spec_original) habilitados
-    para esta actividad: el Excel trae '-' o vacio cuando no aplica."""
-    habilitados = []
-    for clave, etiqueta, tipo in PARAM_DEFS:
-        spec = fila.get(clave)
-        if spec is None or (isinstance(spec, str) and spec.strip() in ("-", "")):
-            continue
-        habilitados.append((clave, etiqueta, tipo, spec))
-    return habilitados
+    def clean_txt(x):
+        if pd.isna(x):
+            return x
+        return re.sub(r"\s+", " ", str(x)).strip()
 
+    text_cols = [
+        "producto", "linea_produccion", "linea_haccp", "componente", "actividad",
+        "peso", "diametro", "altura", "temperatura", "tamizado", "tiempo_mezcla",
+        "decorado", "brix", "organolepticas", "estado_material", "observacion",
+    ]
+    for c in text_cols:
+        df_raw[c] = df_raw[c].apply(clean_txt)
 
-def parsear_rango(spec):
-    """Intenta extraer un rango numerico [low, high] de la especificacion.
-    Soporta '75 +/- 5', '7 a 7.5', '0 - 4', numero suelto. Devuelve None si
-    la especificacion es puramente textual (ej 'LIBRE DE MATERIAL EXTRAÑO')."""
-    if spec is None:
-        return None
-    if isinstance(spec, (int, float)):
-        return (spec, spec)
-    s = str(spec).strip()
+    # Forward-fill: producto/línea de producción/línea HACCP solo aparecen en la
+    # primera fila de cada grupo, el resto queda en blanco en el Excel original.
+    for c in ["producto", "linea_produccion", "linea_haccp"]:
+        df_raw[c] = df_raw[c].ffill()
 
-    m = re.match(r"^(-?\d+(?:\.\d+)?)\s*\+/-\s*(\d+(?:\.\d+)?)$", s)
-    if m:
-        base, tol = float(m.group(1)), float(m.group(2))
-        return (base - tol, base + tol)
+    df_raw["producto"] = df_raw["producto"].str.upper()
+    df_raw["linea_haccp"] = df_raw["linea_haccp"].str.upper()
 
-    m = re.match(r"^(-?\d+(?:\.\d+)?)\s*a\s*(-?\d+(?:\.\d+)?)$", s, re.IGNORECASE)
-    if m:
-        return (float(m.group(1)), float(m.group(2)))
+    df_raw = df_raw[df_raw["tipo"].astype(str).str.upper().str.strip() == "PI"]
 
-    m = re.match(r"^(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)$", s)
-    if m:
-        return (float(m.group(1)), float(m.group(2)))
-
-    m = re.match(r"^(-?\d+(?:\.\d+)?)$", s)
-    if m:
-        v = float(m.group(1))
-        return (v, v)
-
-    return None  # texto puro
+    return df_raw.reset_index(drop=True)
 
 
-def evaluar_conformidad(valor, spec):
-    """True/False/None (None = no se pudo evaluar automaticamente, requiere
-    marca manual)."""
-    rango = parsear_rango(spec)
-    if rango is None or valor is None or valor == "":
-        return None
+def campo_aplica(valor) -> bool:
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return False
+    v = str(valor).strip()
+    return v not in ("", "-", "—", "nan", "None")
+
+
+def get_excel_bytes():
     try:
-        v = float(valor)
-    except (TypeError, ValueError):
-        return None
-    low, high = rango
-    return low <= v <= high
-
-
-# --------------------------------------------------------------------------
-# ESTADO DE SESION
-# --------------------------------------------------------------------------
-
-if "historial" not in st.session_state:
-    st.session_state.historial = []  # lista de dicts, un dict por REGISTRO guardado
-if "paso" not in st.session_state:
-    st.session_state.paso = 1
-
-
-def reiniciar_wizard():
-    st.session_state.paso = 1
-    for k in list(st.session_state.keys()):
-        if k.startswith("form_"):
-            del st.session_state[k]
-
-
-# --------------------------------------------------------------------------
-# CARGA DE DATOS
-# --------------------------------------------------------------------------
-
-st.title("Control de productos en proceso — Registro por actividad")
-
-try:
-    matriz = cargar_matriz(MASTER_XLSX_PATH)
-except FileNotFoundError:
-    st.warning(
-        f"No se encontro '{MASTER_XLSX_PATH}' junto al app. Sube el Excel maestro "
-        "para continuar (debe tener la hoja 'PROCESO-B2B-STB')."
-    )
-    subido = st.file_uploader("Subir Excel maestro (MA-PL-019)", type=["xlsx"])
-    if subido is None:
+        with open(EXCEL_PATH, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        st.warning(
+            f"No encontré el archivo `{EXCEL_PATH}` en la raíz del repositorio."
+        )
+        up = st.file_uploader("Sube el Excel de especificaciones (.xlsx)", type=["xlsx"])
+        if up is not None:
+            return up.read()
         st.stop()
-    matriz = cargar_matriz(subido)
 
-productos = sorted(matriz["producto"].dropna().unique().tolist())
 
-# --------------------------------------------------------------------------
-# WIZARD
-# --------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# ESTADO / WIZARD
+# ----------------------------------------------------------------------------
+if "step" not in st.session_state:
+    st.session_state.step = 1
 
-st.progress(min(st.session_state.paso, 6) / 6)
 
-# ---- Paso 1: datos generales -----------------------------------------
-if st.session_state.paso == 1:
-    st.subheader("1. Datos generales del registro")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        fecha = st.date_input("Fecha", value=date.today(), key="form_fecha")
-    with c2:
-        area = st.text_input("Area", key="form_area")
-    with c3:
-        cliente = st.text_input("Cliente", value="Starbucks", key="form_cliente")
+def go_next():
+    st.session_state.step += 1
 
-    if st.button("Continuar", type="primary"):
-        if not area or not cliente:
-            st.error("Completa Area y Cliente antes de continuar.")
-        else:
-            st.session_state.paso = 2
-            st.rerun()
 
-# ---- Paso 2: producto + actividad --------------------------------------
-elif st.session_state.paso == 2:
-    st.subheader("2. Producto y actividad a registrar")
-    producto = st.selectbox("Producto", productos, key="form_producto")
+def go_back():
+    st.session_state.step -= 1
 
-    actividades_producto = matriz[matriz["producto"] == producto].reset_index(drop=True)
-    # Etiqueta unica por fila: "ACTIVIDAD — sub-componente" cuando la actividad
-    # se repite dentro del mismo producto (ej. "DOSIFICADO" en varios rellenos),
-    # para no confundir a que sub-proceso corresponde cada registro.
-    conteo_actividad = actividades_producto["actividad"].value_counts()
-    etiquetas = []
-    for _, r in actividades_producto.iterrows():
-        if conteo_actividad[r["actividad"]] > 1 and pd.notna(r.get("sub_producto")):
-            etiquetas.append(f"{r['actividad']} — {r['sub_producto']}")
-        else:
-            etiquetas.append(r["actividad"])
-    actividades_producto["_etiqueta"] = etiquetas
 
-    etiqueta_sel = st.selectbox(
-        "Actividad / etapa del proceso (solo se registra UNA por sesion)",
-        actividades_producto["_etiqueta"].tolist(), key="form_actividad",
+excel_bytes = get_excel_bytes()
+specs_df = load_specs(excel_bytes)
+
+# ============================================================================
+# PASO 1 - PORTADA
+# ============================================================================
+if st.session_state.step == 1:
+    st.title("🧪 Registro de Parámetros de Calidad")
+    st.subheader("Producto Intermedio (PI) - Línea de Producción B2B Starbucks")
+    st.markdown(
+        """
+        Esta aplicación permite al **equipo de calidad** registrar la inspección
+        de producto **intermedio** (etapas del proceso, no producto terminado)
+        de la línea B2B Starbucks, siguiendo el plan de muestreo
+        **MIL-STD-105E (Nivel Especial S-2, Inspección Rigurosa, AQL 4.0%)**
+        cuando aplica número de batch.
+        """
+    )
+    st.button("Comenzar registro ➜", on_click=go_next, type="primary")
+
+# ============================================================================
+# PASO 2 - EQUIPO DE CALIDAD, TURNO Y FECHA
+# ============================================================================
+elif st.session_state.step == 2:
+    st.header("1️⃣ Datos del registro")
+
+    responsable = st.selectbox(
+        "Equipo de calidad (responsable del registro)",
+        EQUIPO_CALIDAD,
+        index=EQUIPO_CALIDAD.index(st.session_state.get("responsable", EQUIPO_CALIDAD[0]))
+        if st.session_state.get("responsable") in EQUIPO_CALIDAD else 0,
     )
 
-    fila_sel = actividades_producto[actividades_producto["_etiqueta"] == etiqueta_sel].iloc[0]
-    st.session_state.form_fila = fila_sel.to_dict()
-
-    st.caption(
-        f"Linea HACCP: {fila_sel['linea_haccp']}  |  Tipo: {fila_sel.get('tipo_producto', '-')}  |  "
-        f"Sub-componente: {fila_sel.get('sub_producto', '-')}"
+    turno = st.selectbox(
+        "Turno",
+        TURNOS,
+        index=TURNOS.index(st.session_state.get("turno", TURNOS[0]))
+        if st.session_state.get("turno") in TURNOS else 0,
     )
 
-    habilitados = parametros_habilitados(fila_sel)
-    if habilitados:
-        st.markdown("**Parametros habilitados para esta actividad:**")
-        st.table(pd.DataFrame(
-            [(etq, spec) for _, etq, _, spec in habilitados],
-            columns=["Parametro", "Especificacion"],
-        ))
-    else:
-        st.info("Esta actividad no tiene parametros numericos/organolepticos habilitados en la matriz.")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Atras"):
-            st.session_state.paso = 1
-            st.rerun()
-    with c2:
-        if st.button("Continuar", type="primary"):
-            st.session_state.paso = 3
-            st.rerun()
-
-# ---- Paso 3: aplica batch? ---------------------------------------------
-elif st.session_state.paso == 3:
-    st.subheader("3. Muestreo: ¿la actividad considera batch?")
-    st.write(
-        "Si la actividad se revisa por lote/batch (ej. decorado de galleta, "
-        "con muchas unidades por lote), marca que SI considera batch: el "
-        "numero de muestras se calcula con MIL-STD-105E (Nivel Especial S-2, "
-        "Tabla 2B rigurosa, AQL 4.0%) segun el tamaño del lote. Si es un "
-        "proceso general sin batch definido (ej. tamizado del jugo de "
-        "naranja), marca que NO y se registra 1 sola muestra representativa."
+    fecha_produccion = st.date_input(
+        "Fecha de producción (= fecha de registro)",
+        value=st.session_state.get("fecha_produccion", None),
+        format="DD/MM/YYYY",
     )
+    if fecha_produccion is None:
+        st.caption("⚠️ Selecciona la fecha para continuar (no se precarga sola).")
+
+    st.info(f"**Cliente:** {CLIENTE_FIJO}  |  **Área:** {AREA_FIJA}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary", disabled=fecha_produccion is None):
+            st.session_state.responsable = responsable
+            st.session_state.turno = turno
+            st.session_state.fecha_produccion = fecha_produccion
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 3 - LÍNEA HACCP Y PRODUCTO
+# ============================================================================
+elif st.session_state.step == 3:
+    st.header("2️⃣ Línea HACCP y producto")
+
+    lineas = sorted(specs_df["linea_haccp"].dropna().unique().tolist())
+    linea_sel = st.selectbox("Línea de producción HACCP", lineas)
+
+    productos_linea = sorted(
+        specs_df.loc[specs_df["linea_haccp"] == linea_sel, "producto"].unique().tolist()
+    )
+    producto_sel = st.selectbox("Producto", productos_linea)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.linea_haccp = linea_sel
+            st.session_state.producto = producto_sel
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 4 - ACTIVIDAD (filtrada por producto, distinguiendo repetidas)
+# ============================================================================
+elif st.session_state.step == 4:
+    st.header("3️⃣ Actividad realizada")
+
+    filas_prod = specs_df[specs_df["producto"] == st.session_state.producto].reset_index(drop=True)
+
+    opciones = []
+    for idx, fila in filas_prod.iterrows():
+        etiqueta = f"{fila['actividad']} — {fila['componente']}"
+        opciones.append((idx, etiqueta))
+
+    idx_sel = st.selectbox(
+        "Selecciona la actividad realizada",
+        options=[idx for idx, _ in opciones],
+        format_func=lambda i: dict(opciones)[i],
+    )
+    fila_actividad = filas_prod.loc[idx_sel]
+
+    with st.expander("📋 Ficha de referencia de esta actividad", expanded=True):
+        for clave, label in ALL_PARAM_DEFS:
+            valor = fila_actividad[clave]
+            if campo_aplica(valor):
+                st.markdown(f"**{label}:** {valor}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.fila_actividad = fila_actividad.to_dict()
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 5 - ¿APLICA NÚMERO DE BATCH? Y MUESTREO
+# ============================================================================
+elif st.session_state.step == 5:
+    st.header("4️⃣ Batch y muestreo")
+
     aplica_batch = st.radio(
-        "¿Esta actividad considera batch?",
-        ["Si, considera batch (calcular muestreo MIL-STD-105E)", "No considera batch (1 muestra)"],
-        key="form_aplica_batch_radio",
+        "¿Aplica registrar un número de batch para esta actividad?",
+        ["Sí", "No"],
+        horizontal=True,
+        help="Elige 'No' para procesos generales que aún no se han separado en "
+             "batches (ej. un batido que luego se dosifica). En ese caso se evalúa 1 sola muestra.",
     )
-    st.session_state.form_aplica_batch = aplica_batch.startswith("Si")
 
-    if st.session_state.form_aplica_batch:
-        tamano_lote = st.number_input(
-            "Tamaño del batch (número de unidades del lote)",
-            min_value=2, step=1, value=90, key="form_tamano_lote",
-        )
-        letra, n_muestras, ac, re = calcular_muestreo_mil_std_105e(int(tamano_lote))
-        st.session_state.form_letra_codigo = letra
-        st.session_state.form_ac = ac
-        st.session_state.form_re = re
-        st.info(
-            f"MIL-STD-105E · Nivel S-2 · Tabla 2B (rigurosa) · AQL 4.0%\n\n"
-            f"- Letra codigo: **{letra}**\n"
-            f"- Tamaño de muestra: **{n_muestras}**\n"
-            f"- Criterio Ac/Re: aceptar con **{ac}** o menos no conformes, "
-            f"rechazar con **{re}** o mas."
+    if aplica_batch == "Sí":
+        batch_size = st.number_input("¿Cuántas unidades tiene el batch?", min_value=1, step=1, value=300)
+        letra, n_muestras, ac, re_ = get_sample_size(int(batch_size))
+        st.success(
+            f"Para un batch de **{int(batch_size)}** unidades: letra código **{letra}** → "
+            f"**n = {n_muestras}** muestras. Criterio: Aceptar con **{ac}** o menos no conformes, "
+            f"Rechazar con **{re_}** o más."
         )
     else:
-        n_muestras = 1
-        st.session_state.form_letra_codigo = None
-        st.session_state.form_ac = None
-        st.session_state.form_re = None
+        batch_size = None
+        letra, n_muestras, ac, re_ = None, 1, None, None
+        st.info("No aplica número de batch — se evaluará como **1 sola muestra**.")
 
-    st.session_state.form_n_muestras = n_muestras
-    st.caption(f"Se pedira{'n' if n_muestras > 1 else ''} {n_muestras} muestra{'s' if n_muestras > 1 else ''}.")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Atras", key="atras3"):
-            st.session_state.paso = 2
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.aplica_batch = aplica_batch
+            st.session_state.batch_size = batch_size
+            st.session_state.n_muestras = n_muestras
+            st.session_state.letra_codigo = letra
+            st.session_state.ac = ac
+            st.session_state.re_ = re_
+            go_next()
             st.rerun()
-    with c2:
-        if st.button("Continuar", type="primary", key="cont3"):
-            st.session_state.paso = 4
-            st.rerun()
 
-# ---- Paso 4: registro de parametros (solo CONFORME / NO CONFORME) -------
-elif st.session_state.paso == 4:
-    st.subheader("4. Registro de parametros de control")
-    fila_sel = pd.Series(st.session_state.form_fila)
-    habilitados = parametros_habilitados(fila_sel)
-    n_muestras = st.session_state.form_n_muestras
+# ============================================================================
+# PASO 6 - REGISTRO DE PARÁMETROS POR MUESTRA
+# ============================================================================
+elif st.session_state.step == 6:
+    st.header("5️⃣ Registro de parámetros por muestra")
 
-    if not habilitados:
-        st.info("No hay parametros que registrar para esta actividad; puedes continuar.")
+    fila = st.session_state.fila_actividad
+    n = st.session_state.n_muestras
+
+    st.markdown(f"**Producto:** {st.session_state.producto} &nbsp;|&nbsp; "
+                f"**Actividad:** {fila['actividad']} — {fila['componente']} &nbsp;|&nbsp; "
+                f"**N° de muestras a evaluar:** {n}")
+
+    parametros = []
+    for clave, label in ALL_PARAM_DEFS:
+        valor = fila[clave]
+        if not campo_aplica(valor):
+            continue  # se omite: tenía "-" o estaba vacío
+        if clave == "organolepticas":
+            pregunta = "¿Las características organolépticas cumplen con lo especificado?"
+        elif clave == "estado_material":
+            pregunta = f"¿El estado del material/equipo/herramienta cumple con lo especificado? ({valor})"
+        elif clave == "observacion":
+            pregunta = f"¿Se cumple con la observación/corrección indicada? ({valor})"
+        else:
+            pregunta = f"¿{label} cumple con lo especificado? ({valor})"
+        parametros.append((clave, label, pregunta))
+
+    if not parametros:
+        st.warning("Esta actividad no tiene parámetros de control aplicables.")
     else:
-        st.caption(
-            "Compara la medicion/observacion fisica contra la especificacion de "
-            "la matriz y marca el resultado. No se ingresa el valor medido, "
-            "solo el veredicto."
-        )
+        if "organolepticas" in [p[0] for p in parametros]:
+            with st.expander("Ver detalle completo de características organolépticas"):
+                st.text(fila["organolepticas"])
 
-    conformidades = {}  # clave -> lista de bool por muestra
+        st.caption("Completa cada muestra tocando 'Conforme' o 'No conforme'. Si algún parámetro "
+                   "tiene 1 o más 'No conforme', se habilitará un cuadro de comentario al final de esa pestaña.")
 
-    MUESTRAS_POR_FILA = 6  # evita columnas demasiado angostas cuando n_muestras es grande
+        if "respuestas" not in st.session_state:
+            st.session_state.respuestas = {}
+        if "comentarios_parametro" not in st.session_state:
+            st.session_state.comentarios_parametro = {}
 
-    for clave, etiqueta, _tipo, spec in habilitados:
-        st.markdown(f"**{etiqueta}**  ·  especificacion: `{spec}`")
-        conf_param = []
-        for inicio in range(0, n_muestras, MUESTRAS_POR_FILA):
-            indices_fila = list(range(inicio, min(inicio + MUESTRAS_POR_FILA, n_muestras)))
-            cols = st.columns(len(indices_fila))
-            for col, i in zip(cols, indices_fila):
-                with col:
-                    label_muestra = f"Muestra {i + 1}" if n_muestras > 1 else "Resultado"
-                    resultado = st.radio(
-                        label_muestra, ["Conforme", "No conforme"],
-                        key=f"form_{clave}_{i}", horizontal=False,
+        tabs = st.tabs([label for _, label, _ in parametros])
+        for (clave, label, pregunta), tab in zip(parametros, tabs):
+            with tab:
+                st.markdown(f"**{pregunta}**")
+                hay_no_conforme = False
+                for i in range(n):
+                    key = f"resp_{clave}_{i}"
+                    if key not in st.session_state.respuestas:
+                        st.session_state.respuestas[key] = "Conforme"
+                    valor_actual = st.session_state.respuestas[key]
+                    idx_default = 0 if valor_actual == "Conforme" else 1
+                    st.session_state.respuestas[key] = st.radio(
+                        f"Muestra {i + 1}",
+                        ["Conforme", "No conforme"],
+                        index=idx_default,
+                        horizontal=True,
+                        key=f"widget_{key}",
                     )
-                    conf_param.append(resultado == "Conforme")
-        conformidades[clave] = conf_param
+                    if st.session_state.respuestas[key] == "No conforme":
+                        hay_no_conforme = True
 
-    st.session_state.form_conformidades = conformidades
+                if hay_no_conforme:
+                    st.session_state.comentarios_parametro[clave] = st.text_area(
+                        f"Comentario / corrección para '{label}' (hay al menos 1 muestra No conforme)",
+                        value=st.session_state.comentarios_parametro.get(clave, ""),
+                        key=f"comentario_{clave}",
+                    )
+                else:
+                    st.session_state.comentarios_parametro[clave] = ""
 
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Atras", key="atras4"):
-            st.session_state.paso = 3
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.parametros_muestra = parametros
+            go_next()
             st.rerun()
-    with c2:
-        if st.button("Continuar", type="primary", key="cont4"):
-            st.session_state.paso = 5
-            st.rerun()
 
-# ---- Paso 5: checklist + responsable + observaciones ---------------------
-elif st.session_state.paso == 5:
-    st.subheader("5. Verificaciones adicionales y cierre del registro")
+# ============================================================================
+# PASO 7 - CONCLUSIÓN DEL REGISTRO
+# ============================================================================
+elif st.session_state.step == 7:
+    st.header("6️⃣ Conclusión del registro")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        empaque_ok = st.radio(
-            "Correcto manejo de empaques", ["Si (Correcto)", "No (Incorrecto)"],
-            key="form_empaque_ok",
-        )
-    with c2:
-        estado_material = st.session_state.form_fila.get("estado_material", "-")
-        st.text_input(
-            "Estado de material/equipo/herramienta esperado (referencia matriz)",
-            value=str(estado_material), disabled=True,
-        )
-        material_ok = st.radio(
-            "Se verifico el estado del material/equipo/herramienta",
-            ["Si, conforme", "No, con observaciones"], key="form_material_ok",
-        )
-
-    responsable = st.text_input("Responsable de calidad", key="form_responsable")
-    observaciones = st.text_area(
-        "Observaciones / acciones correctivas", key="form_observaciones",
-        placeholder="Dejar vacio si no hay no conformidades",
+    conclusion = st.radio(
+        "Conclusión",
+        ["Conforme", "No conforme"],
+        index=0 if st.session_state.get("conclusion", "Conforme") == "Conforme" else 1,
+        horizontal=True,
     )
 
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Atras", key="atras5"):
-            st.session_state.paso = 4
-            st.rerun()
-    with c2:
-        if st.button("Guardar registro", type="primary", key="guardar5"):
-            if not responsable:
-                st.error("Ingresa el responsable de calidad antes de guardar.")
-            else:
-                fila_sel = st.session_state.form_fila
-                conformidades = st.session_state.form_conformidades
-                n_muestras = st.session_state.form_n_muestras
-
-                cualquier_no_conforme = any(
-                    c is False for lst in conformidades.values() for c in lst
-                ) or empaque_ok.startswith("No") or material_ok.startswith("No")
-
-                registro = {
-                    "fecha": st.session_state.form_fecha,
-                    "area": st.session_state.form_area,
-                    "cliente": st.session_state.form_cliente,
-                    "producto": fila_sel["producto"],
-                    "sub_componente": fila_sel.get("sub_producto"),
-                    "actividad": fila_sel["actividad"],
-                    "linea_haccp": fila_sel["linea_haccp"],
-                    "aplica_batch": st.session_state.form_aplica_batch,
-                    "tamano_lote": st.session_state.get("form_tamano_lote"),
-                    "letra_codigo_mil_std": st.session_state.get("form_letra_codigo"),
-                    "ac_mil_std": st.session_state.get("form_ac"),
-                    "re_mil_std": st.session_state.get("form_re"),
-                    "n_muestras": n_muestras,
-                    "empaque_ok": empaque_ok.startswith("Si"),
-                    "material_ok": material_ok.startswith("Si"),
-                    "responsable": responsable,
-                    "observaciones": observaciones,
-                    "conforme_general": not cualquier_no_conforme,
-                    "registrado_en": datetime.now(),
-                }
-                # aplanar resultados: peso_1_conforme, peso_2_conforme, ...
-                for clave, lst in conformidades.items():
-                    for i, c in enumerate(lst, start=1):
-                        registro[f"{clave}_{i}_conforme"] = c
-
-                st.session_state.historial.append(registro)
-                st.success("Registro guardado en el historial.")
-                st.session_state.paso = 6
-                st.rerun()
-
-# ---- Paso 6: resumen y opcion de nuevo registro ---------------------------
-elif st.session_state.paso == 6:
-    st.subheader("6. Registro guardado")
-    ultimo = st.session_state.historial[-1]
-    st.json({k: str(v) for k, v in ultimo.items()})
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Registrar otra actividad (mismo producto u otro)", type="primary"):
-            reiniciar_wizard()
-            st.rerun()
-    with c2:
-        if st.button("Ir al historial completo"):
-            st.session_state.paso = 7
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Generar resumen ➜", type="primary"):
+            st.session_state.conclusion = conclusion
+            go_next()
             st.rerun()
 
-# ---- Paso 7: historial + exportacion --------------------------------------
-if st.session_state.paso == 7 or (st.session_state.historial and st.session_state.paso not in range(1, 7)):
-    pass
+# ============================================================================
+# PASO 8 - RESUMEN FINAL Y EXPORTACIÓN
+# ============================================================================
+elif st.session_state.step == 8:
+    st.header("7️⃣ Resumen final")
 
-st.divider()
-st.subheader("Historial de registros (tabla de muestras)")
+    fila = st.session_state.fila_actividad
+    n = st.session_state.n_muestras
+    parametros = st.session_state.parametros_muestra
+    claves_activas = [clave for clave, _, _ in parametros]
 
-if not st.session_state.historial:
-    st.caption("Aun no hay registros guardados en esta sesion.")
-else:
-    df_hist = pd.DataFrame(st.session_state.historial)
-    st.dataframe(df_hist, use_container_width=True)
-
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        df_hist.to_excel(writer, index=False, sheet_name="Historial")
-    st.download_button(
-        "Descargar historial (Excel)", data=buffer.getvalue(),
-        file_name=f"historial_control_proceso_{date.today().isoformat()}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    st.subheader("Datos del registro")
+    resumen_info = pd.DataFrame(
+        {
+            "Campo": [
+                "Equipo de calidad", "Turno", "Fecha de producción", "Cliente", "Área",
+                "Línea HACCP", "Producto", "Componente", "Actividad",
+                "¿Aplica batch?", "Tamaño de batch", "Letra código muestreo",
+                "N° de muestras", "Conclusión",
+            ],
+            "Valor": [
+                st.session_state.responsable, st.session_state.turno,
+                st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
+                CLIENTE_FIJO, AREA_FIJA,
+                st.session_state.linea_haccp, st.session_state.producto,
+                fila["componente"], fila["actividad"],
+                st.session_state.aplica_batch,
+                st.session_state.batch_size if st.session_state.batch_size else "No aplica",
+                st.session_state.letra_codigo if st.session_state.letra_codigo else "No aplica",
+                n, st.session_state.conclusion,
+            ],
+        }
     )
-    st.download_button(
-        "Descargar historial (CSV)", data=df_hist.to_csv(index=False).encode("utf-8"),
-        file_name=f"historial_control_proceso_{date.today().isoformat()}.csv",
-        mime="text/csv",
-    )
+    st.dataframe(resumen_info, use_container_width=True, hide_index=True)
 
-    if st.button("Iniciar un registro nuevo"):
-        reiniciar_wizard()
+    if parametros:
+        st.subheader("Resultados por parámetro (muestras)")
+        conteo = {}
+        for clave, label, _ in parametros:
+            valores = [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
+            conteo[label] = {
+                "Conforme": valores.count("Conforme"),
+                "No conforme": valores.count("No conforme"),
+            }
+        st.dataframe(pd.DataFrame(conteo).T, use_container_width=True)
+
+    # ------------------------------------------------------------------
+    # Armado de la fila exportable (UNA fila por registro, con columnas
+    # fijas ampliadas Muestra 1..8 por cada parámetro posible)
+    # ------------------------------------------------------------------
+    fila_export = {
+        "Fecha": st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
+        "Turno": st.session_state.turno,
+        "Cliente": CLIENTE_FIJO,
+        "Área": AREA_FIJA,
+        "Línea HACCP": st.session_state.linea_haccp,
+        "Producto": st.session_state.producto,
+        "Componente": fila["componente"],
+        "Actividad": fila["actividad"],
+        "¿Aplica Batch?": st.session_state.aplica_batch,
+        "Tamaño de Batch": st.session_state.batch_size if st.session_state.batch_size else "",
+        "Letra código": st.session_state.letra_codigo if st.session_state.letra_codigo else "",
+        "N° de muestras": n,
+    }
+
+    for clave, label in ALL_PARAM_DEFS:
+        valores_muestra = (
+            [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
+            if clave in claves_activas else []
+        )
+        for i in range(MAX_MUESTRAS_COLUMNAS):
+            col_name = f"{label} M{i + 1}"
+            fila_export[col_name] = valores_muestra[i] if i < len(valores_muestra) else ""
+
+    fila_export["Conclusión"] = st.session_state.conclusion
+    fila_export["Iniciales"] = iniciales(st.session_state.responsable)
+
+    export_df = pd.DataFrame([fila_export])
+
+    with st.expander("Ver la fila completa que se exportará"):
+        st.dataframe(export_df, use_container_width=True, hide_index=True)
+
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Registro")
+    excel_buffer.seek(0)
+
+    st.divider()
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        st.download_button(
+            "⬇ Descargar CSV",
+            data=csv_bytes,
+            file_name=f"registro_PI_{st.session_state.producto}_{st.session_state.fecha_produccion}.csv",
+            mime="text/csv",
+        )
+    with col3:
+        st.download_button(
+            "⬇ Descargar Excel",
+            data=excel_buffer,
+            file_name=f"registro_PI_{st.session_state.producto}_{st.session_state.fecha_produccion}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    st.divider()
+    if st.button("🔄 Nuevo registro"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         st.rerun()

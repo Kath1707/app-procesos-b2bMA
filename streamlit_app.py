@@ -236,7 +236,14 @@ def _buscar_archivo_en_carpeta(drive, nombre: str, carpeta_id: str, es_carpeta: 
 
 
 def get_or_create_month_spreadsheet_id(drive, root_folder_id: str, fecha: date) -> str:
-    """Devuelve el ID del Google Sheets del mes correspondiente, creándolo si no existe."""
+    """Devuelve el ID del Google Sheets del mes correspondiente.
+
+    IMPORTANTE: las cuentas de servicio no tienen cuota propia de almacenamiento
+    en Drive, así que NO pueden crear archivos nuevos (falla con
+    'storageQuotaExceeded'). Por eso, si el archivo del mes no existe todavía,
+    en vez de copiarlo automáticamente le pedimos a la persona que lo duplique
+    manualmente una vez (queda con su propia cuota de Drive).
+    """
     subcarpeta_id = _buscar_archivo_en_carpeta(drive, SUBCARPETA_DRIVE, root_folder_id, es_carpeta=True)
     if subcarpeta_id is None:
         raise RuntimeError(f"No encontré la subcarpeta '{SUBCARPETA_DRIVE}' dentro de la carpeta raíz.")
@@ -246,17 +253,12 @@ def get_or_create_month_spreadsheet_id(drive, root_folder_id: str, fecha: date) 
     if archivo_mes_id:
         return archivo_mes_id
 
-    plantilla_id = _buscar_archivo_en_carpeta(drive, PLANTILLA_NOMBRE, subcarpeta_id)
-    if plantilla_id is None:
-        raise RuntimeError(
-            f"No encontré la plantilla '{PLANTILLA_NOMBRE}' dentro de '{SUBCARPETA_DRIVE}'."
-        )
-
-    copia = drive.files().copy(
-        fileId=plantilla_id,
-        body={"name": nombre_mes, "parents": [subcarpeta_id]},
-    ).execute()
-    return copia["id"]
+    raise RuntimeError(
+        f"Todavía no existe el archivo del mes '{nombre_mes}' dentro de "
+        f"'{SUBCARPETA_DRIVE}'. Duplica manualmente '{PLANTILLA_NOMBRE}' en esa "
+        f"carpeta de Drive y renómbralo exactamente '{nombre_mes}' (Google no "
+        f"permite que la cuenta de servicio cree archivos nuevos automáticamente)."
+    )
 
 
 def _encontrar_fila_footer(ws) -> int | None:

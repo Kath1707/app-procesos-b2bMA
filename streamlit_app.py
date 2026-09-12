@@ -46,13 +46,13 @@ EXCEL_PATH = "MA-PL-019_PLAN_CALIDAD_DE_PRODUCTOS.xlsx"  # mismo nivel que este 
 SHEET_NAME = "PROCESO-B2B-STB"
 CLIENTE_FIJO = "STARBUCKS"
 AREA_FIJA = "EMPAQUE"
-MAX_MUESTRAS_COLUMNAS = 6  # igual que la plantilla de Google Sheets (Muestra 1 a 6)
 
 SUBCARPETA_DRIVE = "Productos Intermedios"
 PLANTILLA_NOMBRE = "Proceso PI - Plantilla Base"
 PLANTILLA_HOJA = "Hoja 1"
 FOOTER_MARCA = "V°B° Jefe de Calidad"
-FILA_ENCABEZADO_PLANTILLA = 6  # fila 5-6 = encabezado con sub-columnas Muestra 1..6
+FILA_ENCABEZADO_PLANTILLA = 4  # fila con los títulos de columna (una fila por muestra, como PT)
+SUFIJO_MES = " - PI"
 
 MESES_ES = {
     1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
@@ -85,9 +85,12 @@ ALL_PARAM_DEFS = [
     ("observacion", "Observación/Corrección"),
 ]
 
-# Encabezados EXACTOS de la plantilla de Google Sheets (sin Turno/Batch/Letra código)
-HEADERS_SHEET_FIJOS = ["Fecha", "Cliente", "Área", "Línea HACCP", "Producto", "Componente", "Actividad", "N° de muestras"]
-HEADERS_SHEET_FINALES = ["Conclusión", "Iniciales"]
+# Encabezados EXACTOS de la plantilla de Google Sheets — UNA FILA POR MUESTRA (igual que PT)
+HEADERS_EXPORT = (
+    ["FECHA", "AREA", "CLIENTE", "N° de Muestra", "Línea HACCP", "Producto", "Componente", "Actividad"]
+    + [label for _, label in ALL_PARAM_DEFS]
+    + ["Conclusión", "Iniciales"]
+)
 
 
 def iniciales(nombre_completo: str) -> str:
@@ -98,7 +101,7 @@ def iniciales(nombre_completo: str) -> str:
 
 
 def nombre_mes_es(fecha: date) -> str:
-    return f"{MESES_ES[fecha.month]} {fecha.year}"
+    return f"{MESES_ES[fecha.month]} {fecha.year}{SUFIJO_MES}"
 
 
 # ----------------------------------------------------------------------------
@@ -292,8 +295,8 @@ def get_or_create_daily_worksheet(spreadsheet, fecha: date, turno: str):
     return ws
 
 
-def guardar_en_google_sheets(fila_valores: list) -> tuple:
-    """Guarda una fila en la hoja del día+turno correspondiente, dentro del Sheets del mes."""
+def guardar_en_google_sheets(filas: list) -> tuple:
+    """Guarda varias filas (una por muestra) en la hoja del día+turno correspondiente."""
     gc, drive = get_gsheet_client_and_drive()
     if gc is None or drive is None:
         return False, "No se pudo conectar a Google Drive/Sheets (revisa los Secrets configurados)."
@@ -311,9 +314,9 @@ def guardar_en_google_sheets(fila_valores: list) -> tuple:
 
         fila_footer = _encontrar_fila_footer(ws)
         if fila_footer is None:
-            ws.append_rows([fila_valores])
+            ws.append_rows(filas)
         else:
-            ws.insert_rows([fila_valores], row=fila_footer)
+            ws.insert_rows(filas, row=fila_footer)
 
         return True, (
             f"Guardado en '{nombre_mes_es(fecha)}' → hoja "
@@ -480,12 +483,6 @@ elif st.session_state.step == 5:
             f"**n = {n_muestras}** muestras. Criterio: Aceptar con **{ac}** o menos no conformes, "
             f"Rechazar con **{re_}** o más."
         )
-        if n_muestras > MAX_MUESTRAS_COLUMNAS:
-            st.warning(
-                f"⚠️ El historial en Google Sheets solo tiene espacio hasta Muestra "
-                f"{MAX_MUESTRAS_COLUMNAS}. Se guardarán solo las primeras {MAX_MUESTRAS_COLUMNAS} "
-                f"muestras en el Sheets (el CSV/Excel descargable sí tendrá las {n_muestras} completas)."
-            )
     else:
         batch_size = None
         letra, n_muestras, ac, re_ = None, 1, None, None
@@ -656,69 +653,50 @@ elif st.session_state.step == 8:
         st.dataframe(pd.DataFrame(conteo).T, use_container_width=True)
 
     # ------------------------------------------------------------------
-    # Armado de la fila exportable (UNA fila por registro, con columnas
-    # fijas ampliadas Muestra 1..8 por cada parámetro posible)
+    # Armado de las filas exportables (UNA fila por muestra, igual que PT)
     # ------------------------------------------------------------------
-    fila_export = {
-        "Fecha": st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
-        "Turno": st.session_state.turno,
-        "Cliente": CLIENTE_FIJO,
-        "Área": AREA_FIJA,
-        "Línea HACCP": st.session_state.linea_haccp,
-        "Producto": st.session_state.producto,
-        "Componente": fila["componente"],
-        "Actividad": fila["actividad"],
-        "¿Aplica Batch?": st.session_state.aplica_batch,
-        "Tamaño de Batch": st.session_state.batch_size if st.session_state.batch_size else "",
-        "Letra código": st.session_state.letra_codigo if st.session_state.letra_codigo else "",
-        "N° de muestras": n,
+    valores_por_parametro = {
+        clave: [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
+        for clave in claves_activas
     }
 
-    for clave, label in ALL_PARAM_DEFS:
-        valores_muestra = (
-            [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
-            if clave in claves_activas else []
-        )
-        for i in range(MAX_MUESTRAS_COLUMNAS):
-            col_name = f"{label} M{i + 1}"
-            fila_export[col_name] = valores_muestra[i] if i < len(valores_muestra) else ""
+    def valor_muestra(clave, i):
+        if clave not in valores_por_parametro:
+            return "No aplica"
+        valor = valores_por_parametro[clave][i]
+        if valor == "No conforme":
+            comentario = st.session_state.comentarios_parametro.get(clave, "").strip()
+            if comentario:
+                return f"No conforme: {comentario}"
+        return valor
 
-    fila_export["Conclusión"] = st.session_state.conclusion
-    fila_export["Iniciales"] = iniciales(st.session_state.responsable)
+    filas_export = []
+    for i in range(n):
+        filas_export.append([
+            st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
+            AREA_FIJA,
+            CLIENTE_FIJO,
+            i + 1,
+            st.session_state.linea_haccp,
+            st.session_state.producto,
+            fila["componente"],
+            fila["actividad"],
+        ] + [
+            valor_muestra(clave, i) for clave, _ in ALL_PARAM_DEFS
+        ] + [
+            st.session_state.conclusion,
+            iniciales(st.session_state.responsable),
+        ])
 
-    export_df = pd.DataFrame([fila_export])
+    export_df = pd.DataFrame(filas_export, columns=HEADERS_EXPORT)
 
-    with st.expander("Ver la fila completa que se exportará (CSV/Excel local)"):
+    with st.expander("Ver todas las filas que se guardarán/exportarán"):
         st.dataframe(export_df, use_container_width=True, hide_index=True)
-
-    # ------------------------------------------------------------------
-    # Fila EXACTA para el historial en Google Sheets (sin Turno/Batch/Letra
-    # código, recortada a MAX_MUESTRAS_COLUMNAS, igual que la plantilla)
-    # ------------------------------------------------------------------
-    fila_sheet = [
-        st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
-        CLIENTE_FIJO,
-        AREA_FIJA,
-        st.session_state.linea_haccp,
-        st.session_state.producto,
-        fila["componente"],
-        fila["actividad"],
-        n,
-    ]
-    for clave, _ in ALL_PARAM_DEFS:
-        valores_muestra = (
-            [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
-            if clave in claves_activas else []
-        )
-        for i in range(MAX_MUESTRAS_COLUMNAS):
-            fila_sheet.append(valores_muestra[i] if i < len(valores_muestra) else "")
-    fila_sheet.append(st.session_state.conclusion)
-    fila_sheet.append(iniciales(st.session_state.responsable))
 
     st.divider()
     st.subheader("Guardar historial")
     if st.button("💾 Guardar en Google Sheets (historial)", type="primary"):
-        exito, mensaje = guardar_en_google_sheets(fila_sheet)
+        exito, mensaje = guardar_en_google_sheets(filas_export)
         if exito:
             st.success(mensaje)
         else:

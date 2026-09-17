@@ -295,6 +295,68 @@ def get_or_create_daily_worksheet(spreadsheet, fecha: date, turno: str):
     return ws
 
 
+def obtener_actividades_registradas(fecha: date, turno: str) -> set:
+    """Lee (sin crear nada) qué combinaciones Producto+Componente+Actividad ya
+    tienen registro en la hoja del día+turno. Si el archivo del mes o la hoja
+    todavía no existen, devuelve un conjunto vacío."""
+    gc, drive = get_gsheet_client_and_drive()
+    if gc is None or drive is None:
+        return set()
+    try:
+        root_folder_id = st.secrets.get("ROOT_FOLDER_ID")
+        if not root_folder_id:
+            return set()
+
+        subcarpeta_id = _buscar_archivo_en_carpeta(drive, SUBCARPETA_DRIVE, root_folder_id, es_carpeta=True)
+        if subcarpeta_id is None:
+            return set()
+
+        nombre_mes = nombre_mes_es(fecha)
+        archivo_mes_id = _buscar_archivo_en_carpeta(drive, nombre_mes, subcarpeta_id)
+        if archivo_mes_id is None:
+            return set()
+
+        spreadsheet = gc.open_by_key(archivo_mes_id)
+        titulo_hoja = f"{fecha.strftime('%Y-%m-%d')} {turno}"
+        try:
+            ws = spreadsheet.worksheet(titulo_hoja)
+        except gspread.exceptions.WorksheetNotFound:
+            return set()
+
+        valores = ws.get_all_values()
+        if len(valores) < FILA_ENCABEZADO_PLANTILLA:
+            return set()
+
+        encabezado = valores[FILA_ENCABEZADO_PLANTILLA - 1]
+        indices = {}
+        for idx, h in enumerate(encabezado):
+            h_norm = h.strip().upper()
+            if h_norm == "PRODUCTO":
+                indices["producto"] = idx
+            elif h_norm == "COMPONENTE":
+                indices["componente"] = idx
+            elif h_norm == "ACTIVIDAD":
+                indices["actividad"] = idx
+        if len(indices) < 3:
+            return set()
+
+        combinaciones = set()
+        for fila in valores[FILA_ENCABEZADO_PLANTILLA:]:
+            if fila and fila[0].strip().upper().startswith(FOOTER_MARCA.upper()):
+                break
+            if len(fila) > max(indices.values()):
+                combo = (
+                    fila[indices["producto"]].strip().upper(),
+                    fila[indices["componente"]].strip().upper(),
+                    fila[indices["actividad"]].strip().upper(),
+                )
+                if all(combo):
+                    combinaciones.add(combo)
+        return combinaciones
+    except Exception:
+        return set()
+
+
 def guardar_en_google_sheets(filas: list) -> tuple:
     """Guarda varias filas (una por muestra) en la hoja del día+turno correspondiente."""
     gc, drive = get_gsheet_client_and_drive()
@@ -432,12 +494,43 @@ elif st.session_state.step == 3:
 elif st.session_state.step == 4:
     st.header("3️⃣ Actividad realizada")
 
+    cache_key = (st.session_state.fecha_produccion, st.session_state.turno)
+    if st.session_state.get("actividades_cache_key") != cache_key:
+        with st.spinner("Revisando qué actividades ya se registraron en este turno..."):
+            st.session_state.actividades_registradas = obtener_actividades_registradas(
+                st.session_state.fecha_produccion, st.session_state.turno
+            )
+        st.session_state.actividades_cache_key = cache_key
+    actividades_hechas = st.session_state.actividades_registradas
+
+    producto_actual = st.session_state.producto.strip().upper()
     filas_prod = specs_df[specs_df["producto"] == st.session_state.producto].reset_index(drop=True)
 
     opciones = []
+    ya_registradas_labels = []
     for idx, fila in filas_prod.iterrows():
+        combo = (producto_actual, fila["componente"].strip().upper(), fila["actividad"].strip().upper())
         etiqueta = f"{fila['actividad']} — {fila['componente']}"
+        if combo in actividades_hechas:
+            ya_registradas_labels.append(etiqueta)
+            continue
         opciones.append((idx, etiqueta))
+
+    if ya_registradas_labels:
+        st.warning(
+            f"⚠️ Ya hay registro en el turno **{st.session_state.turno}** de "
+            f"{st.session_state.fecha_produccion.strftime('%d/%m/%Y')} para: "
+            + ", ".join(ya_registradas_labels) +
+            ". No aparecen abajo para evitar duplicados (el producto sí puede repetirse con otra actividad)."
+        )
+
+    if not opciones:
+        st.error(
+            "Todas las actividades de este producto ya fueron registradas en este turno. "
+            "Elige otro producto, u otro turno si corresponde."
+        )
+        st.button("⬅ Atrás", on_click=go_back)
+        st.stop()
 
     idx_sel = st.selectbox(
         "Selecciona la actividad realizada",
@@ -696,11 +789,29 @@ elif st.session_state.step == 8:
     st.divider()
     st.subheader("Guardar historial")
     if st.button("💾 Guardar en Google Sheets (historial)", type="primary"):
-        exito, mensaje = guardar_en_google_sheets(filas_export)
-        if exito:
-            st.success(mensaje)
+        combo_actual = (
+            st.session_state.producto.strip().upper(),
+            fila["componente"].strip().upper(),
+            fila["actividad"].strip().upper(),
+        )
+        actividades_actuales = obtener_actividades_registradas(
+            st.session_state.fecha_produccion, st.session_state.turno
+        )
+        if combo_actual in actividades_actuales:
+            st.error(
+                f"⚠️ No se guardó: **{fila['actividad']} — {fila['componente']}** de "
+                f"**{st.session_state.producto}** ya tiene registro en el turno "
+                f"{st.session_state.turno} de hoy, probablemente hecho por otro supervisor "
+                "mientras completabas este formulario. Puedes descargar este registro como "
+                "respaldo (CSV/Excel abajo), pero no se duplicará en el historial."
+            )
         else:
-            st.error(mensaje)
+            exito, mensaje = guardar_en_google_sheets(filas_export)
+            if exito:
+                st.success(mensaje)
+                st.session_state.actividades_registradas = actividades_actuales | {combo_actual}
+            else:
+                st.error(mensaje)
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
     excel_buffer = io.BytesIO()

@@ -295,10 +295,48 @@ def get_or_create_daily_worksheet(spreadsheet, fecha: date, turno: str):
     return ws
 
 
-def obtener_actividades_registradas(fecha: date, turno: str) -> set:
+def _leer_combinaciones_de_hoja(ws) -> set:
+    """Lee de una worksheet ya abierta qué combinaciones Producto+Componente+Actividad
+    tiene registradas. Devuelve un conjunto vacío si no hay datos o falta el encabezado."""
+    valores = ws.get_all_values()
+    if len(valores) < FILA_ENCABEZADO_PLANTILLA:
+        return set()
+
+    encabezado = valores[FILA_ENCABEZADO_PLANTILLA - 1]
+    indices = {}
+    for idx, h in enumerate(encabezado):
+        h_norm = h.strip().upper()
+        if h_norm == "PRODUCTO":
+            indices["producto"] = idx
+        elif h_norm == "COMPONENTE":
+            indices["componente"] = idx
+        elif h_norm == "ACTIVIDAD":
+            indices["actividad"] = idx
+    if len(indices) < 3:
+        return set()
+
+    combinaciones = set()
+    for fila in valores[FILA_ENCABEZADO_PLANTILLA:]:
+        if fila and fila[0].strip().upper().startswith(FOOTER_MARCA.upper()):
+            break
+        if len(fila) > max(indices.values()):
+            combo = (
+                fila[indices["producto"]].strip().upper(),
+                fila[indices["componente"]].strip().upper(),
+                fila[indices["actividad"]].strip().upper(),
+            )
+            if all(combo):
+                combinaciones.add(combo)
+    return combinaciones
+
+
+def obtener_actividades_registradas(fecha: date, turno: str = None) -> set:
     """Lee (sin crear nada) qué combinaciones Producto+Componente+Actividad ya
-    tienen registro en la hoja del día+turno. Si el archivo del mes o la hoja
-    todavía no existen, devuelve un conjunto vacío."""
+    tienen registro en CUALQUIER hoja (Día, Tarde, Madrugada) de esa fecha, para
+    evitar que una misma actividad se registre dos veces en distintos turnos del
+    mismo día. El parámetro 'turno' se mantiene solo por compatibilidad y ya no
+    limita la búsqueda. Si el archivo del mes todavía no existe, devuelve un
+    conjunto vacío."""
     gc, drive = get_gsheet_client_and_drive()
     if gc is None or drive is None:
         return set()
@@ -317,41 +355,15 @@ def obtener_actividades_registradas(fecha: date, turno: str) -> set:
             return set()
 
         spreadsheet = gc.open_by_key(archivo_mes_id)
-        titulo_hoja = f"{fecha.strftime('%Y-%m-%d')} {turno}"
-        try:
-            ws = spreadsheet.worksheet(titulo_hoja)
-        except gspread.exceptions.WorksheetNotFound:
-            return set()
-
-        valores = ws.get_all_values()
-        if len(valores) < FILA_ENCABEZADO_PLANTILLA:
-            return set()
-
-        encabezado = valores[FILA_ENCABEZADO_PLANTILLA - 1]
-        indices = {}
-        for idx, h in enumerate(encabezado):
-            h_norm = h.strip().upper()
-            if h_norm == "PRODUCTO":
-                indices["producto"] = idx
-            elif h_norm == "COMPONENTE":
-                indices["componente"] = idx
-            elif h_norm == "ACTIVIDAD":
-                indices["actividad"] = idx
-        if len(indices) < 3:
-            return set()
 
         combinaciones = set()
-        for fila in valores[FILA_ENCABEZADO_PLANTILLA:]:
-            if fila and fila[0].strip().upper().startswith(FOOTER_MARCA.upper()):
-                break
-            if len(fila) > max(indices.values()):
-                combo = (
-                    fila[indices["producto"]].strip().upper(),
-                    fila[indices["componente"]].strip().upper(),
-                    fila[indices["actividad"]].strip().upper(),
-                )
-                if all(combo):
-                    combinaciones.add(combo)
+        for t in TURNOS:
+            titulo_hoja = f"{fecha.strftime('%Y-%m-%d')} {t}"
+            try:
+                ws = spreadsheet.worksheet(titulo_hoja)
+            except gspread.exceptions.WorksheetNotFound:
+                continue
+            combinaciones |= _leer_combinaciones_de_hoja(ws)
         return combinaciones
     except Exception:
         return set()
@@ -494,11 +506,11 @@ elif st.session_state.step == 3:
 elif st.session_state.step == 4:
     st.header("3️⃣ Actividad realizada")
 
-    cache_key = (st.session_state.fecha_produccion, st.session_state.turno)
+    cache_key = st.session_state.fecha_produccion
     if st.session_state.get("actividades_cache_key") != cache_key:
-        with st.spinner("Revisando qué actividades ya se registraron en este turno..."):
+        with st.spinner("Revisando qué actividades ya se registraron ese día (en cualquier turno)..."):
             st.session_state.actividades_registradas = obtener_actividades_registradas(
-                st.session_state.fecha_produccion, st.session_state.turno
+                st.session_state.fecha_produccion
             )
         st.session_state.actividades_cache_key = cache_key
     actividades_hechas = st.session_state.actividades_registradas
@@ -518,7 +530,7 @@ elif st.session_state.step == 4:
 
     if ya_registradas_labels:
         st.warning(
-            f"⚠️ Ya hay registro en el turno **{st.session_state.turno}** de "
+            f"⚠️ Ya hay registro (en algún turno) de "
             f"{st.session_state.fecha_produccion.strftime('%d/%m/%Y')} para: "
             + ", ".join(ya_registradas_labels) +
             ". No aparecen abajo para evitar duplicados (el producto sí puede repetirse con otra actividad)."
@@ -526,8 +538,8 @@ elif st.session_state.step == 4:
 
     if not opciones:
         st.error(
-            "Todas las actividades de este producto ya fueron registradas en este turno. "
-            "Elige otro producto, u otro turno si corresponde."
+            "Todas las actividades de este producto ya fueron registradas ese día, en algún turno. "
+            "Elige otro producto, u otra fecha si corresponde."
         )
         st.button("⬅ Atrás", on_click=go_back)
         st.stop()
@@ -795,15 +807,15 @@ elif st.session_state.step == 8:
             fila["actividad"].strip().upper(),
         )
         actividades_actuales = obtener_actividades_registradas(
-            st.session_state.fecha_produccion, st.session_state.turno
+            st.session_state.fecha_produccion
         )
         if combo_actual in actividades_actuales:
             st.error(
                 f"⚠️ No se guardó: **{fila['actividad']} — {fila['componente']}** de "
-                f"**{st.session_state.producto}** ya tiene registro en el turno "
-                f"{st.session_state.turno} de hoy, probablemente hecho por otro supervisor "
-                "mientras completabas este formulario. Puedes descargar este registro como "
-                "respaldo (CSV/Excel abajo), pero no se duplicará en el historial."
+                f"**{st.session_state.producto}** ya tiene registro en algún turno de "
+                f"{st.session_state.fecha_produccion.strftime('%d/%m/%Y')}, probablemente hecho "
+                "por otro supervisor mientras completabas este formulario. Puedes descargar este "
+                "registro como respaldo (CSV/Excel abajo), pero no se duplicará en el historial."
             )
         else:
             exito, mensaje = guardar_en_google_sheets(filas_export)

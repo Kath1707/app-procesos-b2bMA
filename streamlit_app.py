@@ -1,5 +1,6 @@
 """
 App de Registro de Parámetros de Calidad - Producto Intermedio (PI) B2B Starbucks
+(v4 - incluye CONTROL DE INOCUIDAD, Plan de Calidad MA-PL-019)
 ====================================================================================
 Streamlit + Google Drive/Sheets (histórico mensual, una hoja por día+turno).
 
@@ -85,10 +86,203 @@ ALL_PARAM_DEFS = [
     ("observacion", "Observación/Corrección"),
 ]
 
-# Encabezados EXACTOS de la plantilla de Google Sheets — UNA FILA POR MUESTRA (igual que PT)
+# ----------------------------------------------------------------------------
+# CONTROL DE INOCUIDAD (Plan MA-PL-019, hoja PROCESO-B2B-STB, columnas "CONTROL DE LA INOCUIDAD")
+# Cada control aplica solo a ciertas actividades (el resto es "NO APLICA" en el plan y NO se
+# muestra al operario). Orden = orden del plan.
+#   nivel "lote"   -> una sola respuesta por actividad (se repite en todas las filas/muestras)
+#   nivel "muestra"-> una respuesta por muestra (hermeticidad: el plan pide muestreo según tabla)
+# ----------------------------------------------------------------------------
+INOCUIDAD_DEFS = [
+    # (clave, pestaña, encabezado del historial, pregunta, nivel)
+    ("desinfeccion", "Desinfección huevo/naranja", "Desinfección Huevo/Naranja (C/NC)",
+     "¿Se realizó la desinfección conforme al plan? ({criterio})", "lote"),
+    ("horneado", "Horneado/Cocción", "Horneado/Cocción (C/NC)",
+     "¿Se cumplió la temperatura y el tiempo de {proceso}? ({criterio})", "lote"),
+    ("enfriado", "Enfriado", "Enfriado (C/NC)",
+     "¿El producto cumple la temperatura de enfriado? ({criterio})", "lote"),
+    ("hermeticidad", "Hermeticidad", "Hermeticidad (C/NC)",
+     "¿El envase cierra herméticamente y se envasó en las condiciones del plan? ({criterio})", "muestra"),
+    ("alergeno", "Control de alérgeno", "Control Alérgeno Frutos Secos (C/NC)",
+     "¿Se realizó y verificó la limpieza/desinfección de control de alérgeno? ({criterio})", "lote"),
+]
+
+# Criterios de inocuidad por (PRODUCTO, COMPONENTE, ACTIVIDAD) — hoja PROCESO-B2B-STB, Plan MA-PL-019 v01 (27.07.26).
+# Claves en MAYÚSCULAS. Orden de controles = orden del plan: desinfección -> horneado/cocción -> enfriado -> hermeticidad -> alérgeno.
+# Si una actividad no aparece aquí, el plan indica 'NO APLICA' para los 5 controles.
+INOCUIDAD_PI = {
+    ('GALLETA CHIP CHOCOLATE', 'MASA GALLETA', 'FORMADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 124°C · Tiempo: 20 min · Dorado: 135°C x 5 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA CHIP CHOCOLATE', 'GALLETA CHIP', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('GALLETA CHOCOCHOCO', 'MASA GALLETA', 'MEZCLADO HUEVO Y AZÚCAR'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+    },
+    ('GALLETA CHOCOCHOCO', 'MASA GALLETA', 'FORMADO'): {
+        'horneado': 'T°: 128°C · Tiempo: 20 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA CHOCOCHOCO', 'GALLETA CHOCO', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('GALLETA CRAMBERRIES', 'MASA GALLETA', 'FORMADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T°: 120°C · Tiempo: 18 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA CRAMBERRIES', 'GALLETA CRANBERRY', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('GALLETA AVENA Y PASAS', 'MASA GALLETA', 'FORMADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T°: 124°C · Tiempo: 18 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA AVENA Y PASAS', 'GALLETA AVENA Y PASAS', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('GALLETA AVELLANA', 'MASA GALLETA', 'RELLENADO DE NUTELLA'): {
+        'alergeno': 'Alérgeno: avellana · Concentración: 200 ppm · Frecuencia: cada que se procesa L&D UTENSILIOS Y MESA TRABAJO',
+    },
+    ('GALLETA AVELLANA', 'MASA GALLETA', 'FORMADO/DECORADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 124°C · Tiempo: 15 min · Dorado: 135°C x 5 min · Frecuencia: cada que hornea',
+        'alergeno': 'Alérgeno: avellana · Concentración: 200 ppm · Frecuencia: cada que se procesa L&D UTENSILIOS Y MESA TRABAJO',
+    },
+    ('GALLETA AVELLANA', 'GALLETA AVELLANA', 'DECORADO//ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+        'alergeno': 'Alérgeno: avellana · Concentración: 200 ppm · Frecuencia: cada que se procesa L&D UTENSILIOS Y MESA TRABAJO',
+    },
+    ('MUFFIN DE NARANJA CHIP', 'INSUMOS', 'TAMIZADO NARANJA'): {
+        'desinfeccion': 'Desinfección de naranja · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se produzca este muffin',
+    },
+    ('MUFFIN DE NARANJA CHIP', 'MASA DE MUFFIN', 'DOSIFICADO (MECÁNICO)/MANGA'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 125 a 127°C · Tiempo: 30 a 32 min · Frecuencia: cada que hornea',
+    },
+    ('MUFFIN DE NARANJA CHIP', 'MUFFIN NARANJA', 'ENFRIADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('MUFFIN DE CHOCOLATE', 'MASA DE MUFFIN', 'DOSIFICADO (MECÁNICO)/MANGA'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 125 a 127°C · Tiempo: 30 a 32 min · Frecuencia: cada que hornea',
+    },
+    ('MUFFIN DE CHOCOLATE', 'MUFFIN', 'ENFRIADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('MUFFIN DE MANZANA', 'INSUMOS', 'REPOSO COMPOTA'): {
+        'horneado': 'T° cocción: 140°C · Tiempo: 50 min · Frecuencia: cada que produce',
+    },
+    ('MUFFIN DE MANZANA', 'MASA DE MUFFIN', 'DOSIFICADO (MECÁNICO)/MANGA'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 125 a 127°C · Tiempo: 30 a 32 min · Frecuencia: cada que hornea',
+    },
+    ('MUFFIN DE MANZANA', 'MUFFIN MANZANA', 'ENFRIADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('MUFFIN DE BERRIES', 'MASA DE MUFFIN', 'DOSIFICADO (MECÁNICO)/MANGA'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 125 a 127°C · Tiempo: 30 a 32 min · Frecuencia: cada que hornea',
+    },
+    ('MUFFIN DE BERRIES', 'MUFFFIN BERRIES', 'ENFRIADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('KEKE DE LIMÓN', 'MASA KEKE', 'DOSIFICADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: H1= 133°C y H2: 126°C · Tiempo: 60 min · Frecuencia: cada que hornea',
+    },
+    ('KEKE DE LIMÓN', 'KEKE', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('KEKE DE ZANAHORIA', 'MASA KEKE', 'DOSIFICADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: H1= 133°C y H2: 126°C · Tiempo: 60 min · Frecuencia: cada que hornea',
+    },
+    ('KEKE DE ZANAHORIA', 'KEKE', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+        'alergeno': 'Alérgeno: pecana · Concentración: 200 ppm · Frecuencia: cada que se procesa L&D UTENSILIOS Y MESA TRABAJO',
+    },
+    ('PIE DE LIMON', 'INSUMOS', 'DISOLUCIÓN HUEVO - AZÚCAR'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° dilución: 70°C · Tiempo: llegue T° · Frecuencia: cada que produce',
+    },
+    ('PIE DE LIMON', 'RELLENO PIE', 'DOSIFICADO/RELLENADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+    },
+    ('PIE DE LIMON', 'PIE LIMON', 'ENFRIADO/DECORADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+    },
+    ('CRUMBLE DE BERRIES', 'RELLENO', 'RELLENADO'): {
+        'horneado': 'T° cocción: 140°C · Tiempo: 180 min · Frecuencia: cada que produce',
+    },
+    ('CRUMBLE DE BERRIES', 'CRUMBLE', 'DOSIFICADO/ACONDICIONADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('TORTA CHOCOLATE', 'MASA TORTA', 'BATIDO ADICIÓN DE HUEVO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+    },
+    ('TORTA CHOCOLATE', 'ALMÍBAR', 'HUMECTADO CON ALMÍBAR'): {
+        'horneado': 'T° cocción: 100°C · Tiempo: 5 min · Frecuencia: cada que produce',
+    },
+    ('TORTA CHOCOLATE', 'RELLENO FUDGE', 'DOSIFICADO'): {
+        'horneado': 'T° cocción: 110°C · Tiempo: 52 min · Frecuencia: cada que produce',
+    },
+    ('TORTA CHOCOLATE', 'TORTA PORCIÓN', 'CORTADO/DECORADO'): {
+        'enfriado': 'T°: ≤15°C · Frecuencia: cada que se produzca',
+    },
+    ('CINNAMON', 'MASA CINNAMON', 'PINTADO'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 - 5 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 120°C · Tiempo: 30 min · Frecuencia: cada que hornea',
+    },
+    ('CINNAMON', 'CINNAMON', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+    ('CHESSCAKE BITE', 'CHESSCAKE BITE', 'CORTADO/DECORADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
+}
+
+
+def _norm_clave(x) -> str:
+    return re.sub(r"\s+", " ", str(x)).strip().upper()
+
+
+def inocuidad_de_actividad(producto, componente, actividad) -> dict:
+    """Devuelve {clave_control: criterio} para la actividad (vacío si no aplica ninguno)."""
+    return INOCUIDAD_PI.get((_norm_clave(producto), _norm_clave(componente), _norm_clave(actividad)), {})
+
+
+def nombre_proceso_termico(criterio: str) -> str:
+    c = criterio.lower()
+    if "dilución" in c:
+        return "dilución"
+    if "hornea" in c:
+        return "horneado"
+    return "cocción"
+
+
+# Encabezados EXACTOS de la plantilla — UNA FILA POR MUESTRA (igual que PT).
+# Orden del plan: ... Estado del material -> CONTROL INOCUIDAD (5) -> Observación/Corrección.
+PARAMS_ANTES_INOCUIDAD = [d for d in ALL_PARAM_DEFS if d[0] != "observacion"]
 HEADERS_EXPORT = (
     ["FECHA", "AREA", "CLIENTE", "N° de Muestra", "Línea HACCP", "Producto", "Componente", "Actividad"]
-    + [label for _, label in ALL_PARAM_DEFS]
+    + [label for _, label in PARAMS_ANTES_INOCUIDAD]
+    + [h for _, _, h, _, _ in INOCUIDAD_DEFS]
+    + ["Observación/Corrección"]
     + ["Conclusión", "Iniciales"]
 )
 
@@ -151,13 +345,29 @@ def load_specs(excel_bytes: bytes) -> pd.DataFrame:
         "producto", "linea_produccion", "linea_haccp", "componente", "actividad",
         "tipo", "peso", "diametro", "altura", "temperatura", "tamizado",
         "tiempo_mezcla", "decorado", "brix", "organolepticas", "estado_material",
-        "responsable", "observacion",
     ]
+    # Layout del Excel: el plan nuevo (v01, 27.07.26) trae 5 columnas de CONTROL DE INOCUIDAD
+    # entre "Estado del material" y "Responsable". Los criterios de inocuidad se leen de
+    # INOCUIDAD_PI (dentro de este código), así que aquí solo se saltan esas columnas.
+    hdr = pd.read_excel(io.BytesIO(excel_bytes), sheet_name=SHEET_NAME, header=None, nrows=7)
+    layout_con_inocuidad = hdr.astype(str).apply(
+        lambda col: col.str.contains("INOCUIDAD", case=False, na=False)
+    ).any().any()
+    if layout_con_inocuidad:
+        cols = cols + ["_q", "_r", "_s", "_t", "_u"]
+    cols = cols + ["responsable", "observacion"]
     df_raw = df_raw.iloc[:, : len(cols)]
     df_raw.columns = cols
 
     # Solo nos quedamos con filas que tengan actividad (evita filas totalmente vacías)
     df_raw = df_raw[df_raw["actividad"].notna()].copy()
+
+    # En el Excel, el criterio "PUNTO NIEVE: PICO FIRME Y ESTABLE" (merengue) quedó escrito en la
+    # columna RESPONSABLE en vez de Observación: se traslada a observación.
+    resp_txt = df_raw["responsable"].astype(str).str.strip().str.upper()
+    mask_obs = df_raw["responsable"].notna() & ~resp_txt.isin(["A.C.", "AC", "A.C", "NAN", ""]) \
+        & df_raw["observacion"].isna()
+    df_raw.loc[mask_obs, "observacion"] = df_raw.loc[mask_obs, "responsable"]
 
     def clean_txt(x):
         if pd.isna(x):
@@ -552,10 +762,19 @@ elif st.session_state.step == 4:
     fila_actividad = filas_prod.loc[idx_sel]
 
     with st.expander("📋 Ficha de referencia de esta actividad", expanded=True):
-        for clave, label in ALL_PARAM_DEFS:
+        for clave, label in PARAMS_ANTES_INOCUIDAD:
             valor = fila_actividad[clave]
             if campo_aplica(valor):
                 st.markdown(f"**{label}:** {valor}")
+        inocu_ref = inocuidad_de_actividad(
+            st.session_state.producto, fila_actividad["componente"], fila_actividad["actividad"]
+        )
+        for clave, tab_label, _, _, _ in INOCUIDAD_DEFS:
+            if clave in inocu_ref:
+                st.markdown(f"🛡️ **{tab_label}:** {inocu_ref[clave]}")
+        valor_obs = fila_actividad["observacion"]
+        if campo_aplica(valor_obs):
+            st.markdown(f"**Observación/Corrección:** {valor_obs}")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -563,6 +782,9 @@ elif st.session_state.step == 4:
     with col2:
         if st.button("Siguiente ➜", type="primary"):
             st.session_state.fila_actividad = fila_actividad.to_dict()
+            st.session_state.inocuidad_actividad = inocuidad_de_actividad(
+                st.session_state.producto, fila_actividad["componente"], fila_actividad["actividad"]
+            )
             go_next()
             st.rerun()
 
@@ -690,10 +912,83 @@ elif st.session_state.step == 6:
             st.rerun()
 
 # ============================================================================
-# PASO 7 - CONCLUSIÓN DEL REGISTRO
+# PASO 7 - CONTROL DE INOCUIDAD (MA-PL-019) - solo los controles que aplican a la actividad
 # ============================================================================
 elif st.session_state.step == 7:
-    st.header("6️⃣ Conclusión del registro")
+    st.header("6️⃣ Control de inocuidad")
+
+    fila = st.session_state.fila_actividad
+    n = st.session_state.n_muestras
+    criterios = st.session_state.get("inocuidad_actividad", {})
+    controles = [d for d in INOCUIDAD_DEFS if d[0] in criterios]
+
+    st.markdown(f"**Producto:** {st.session_state.producto} &nbsp;|&nbsp; "
+                f"**Actividad:** {fila['actividad']} — {fila['componente']}")
+
+    if "respuestas_inocuidad" not in st.session_state:
+        st.session_state.respuestas_inocuidad = {}
+    if "comentarios_inocuidad" not in st.session_state:
+        st.session_state.comentarios_inocuidad = {}
+
+    if not controles:
+        st.info("Según el plan de calidad (MA-PL-019), esta actividad **no tiene controles de "
+                "inocuidad aplicables**. Puedes continuar.")
+    else:
+        st.caption("Solo se muestran los controles que aplican a esta actividad. Los controles de "
+                   "lote se responden **una vez** (valen para todas las muestras); hermeticidad se "
+                   "responde **por muestra**. Si marcas 'No conforme' se habilitará la acción correctiva.")
+        tabs_in = st.tabs([f"🛡️ {tab}" for _, tab, _, _, _ in controles])
+        for (clave, tab_label, _, plantilla_preg, nivel), tab in zip(controles, tabs_in):
+            criterio = criterios[clave]
+            pregunta = plantilla_preg.format(
+                criterio=criterio, proceso=nombre_proceso_termico(criterio)
+            )
+            with tab:
+                st.markdown(f"**{pregunta}**")
+                hay_nc = False
+                indices = range(n) if nivel == "muestra" else [None]
+                for i in indices:
+                    key = f"inocu_{clave}" if i is None else f"inocu_{clave}_{i}"
+                    etiqueta = "Resultado del lote/actividad" if i is None else f"Muestra {i + 1}"
+                    actual = st.session_state.respuestas_inocuidad.get(key, "Conforme")
+                    st.session_state.respuestas_inocuidad[key] = st.radio(
+                        etiqueta, ["Conforme", "No conforme"],
+                        index=0 if actual == "Conforme" else 1,
+                        horizontal=True, key=f"widget_{key}",
+                    )
+                    if st.session_state.respuestas_inocuidad[key] == "No conforme":
+                        hay_nc = True
+                if hay_nc:
+                    st.session_state.comentarios_inocuidad[clave] = st.text_area(
+                        f"Acción correctiva / comentario para '{tab_label}'",
+                        value=st.session_state.comentarios_inocuidad.get(clave, ""),
+                        key=f"comentario_inocu_{clave}",
+                    )
+                else:
+                    st.session_state.comentarios_inocuidad[clave] = ""
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.controles_inocuidad = [d[0] for d in controles]
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 8 - CONCLUSIÓN DEL REGISTRO
+# ============================================================================
+elif st.session_state.step == 8:
+    st.header("7️⃣ Conclusión del registro")
+
+    nc_in = [d[1] for d in INOCUIDAD_DEFS
+             if d[0] in st.session_state.get("controles_inocuidad", [])
+             and any(v == "No conforme" for k, v in st.session_state.respuestas_inocuidad.items()
+                     if k == f"inocu_{d[0]}" or k.startswith(f"inocu_{d[0]}_"))]
+    if nc_in:
+        st.warning("⚠️ Hay controles de inocuidad **No conforme**: " + ", ".join(nc_in)
+                   + ". Considéralo al concluir el registro.")
 
     conclusion = st.radio(
         "Conclusión",
@@ -712,10 +1007,10 @@ elif st.session_state.step == 7:
             st.rerun()
 
 # ============================================================================
-# PASO 8 - RESUMEN FINAL Y EXPORTACIÓN
+# PASO 9 - RESUMEN FINAL Y EXPORTACIÓN
 # ============================================================================
-elif st.session_state.step == 8:
-    st.header("7️⃣ Resumen final")
+elif st.session_state.step == 9:
+    st.header("8️⃣ Resumen final")
 
     fila = st.session_state.fila_actividad
     n = st.session_state.n_muestras
@@ -757,6 +1052,21 @@ elif st.session_state.step == 8:
             }
         st.dataframe(pd.DataFrame(conteo).T, use_container_width=True)
 
+    controles_activos = st.session_state.get("controles_inocuidad", [])
+    if controles_activos:
+        st.subheader("Control de inocuidad")
+        filas_in = []
+        for clave, tab_label, _, _, nivel in INOCUIDAD_DEFS:
+            if clave not in controles_activos:
+                continue
+            vals = [st.session_state.respuestas_inocuidad.get(
+                        f"inocu_{clave}" if nivel == "lote" else f"inocu_{clave}_{i}", "Conforme")
+                    for i in (range(n) if nivel == "muestra" else [None])] if nivel == "muestra" else \
+                   [st.session_state.respuestas_inocuidad.get(f"inocu_{clave}", "Conforme")]
+            filas_in.append({"Control": tab_label, "Nivel": "Por muestra" if nivel == "muestra" else "Lote",
+                             "Conforme": vals.count("Conforme"), "No conforme": vals.count("No conforme")})
+        st.dataframe(pd.DataFrame(filas_in), use_container_width=True, hide_index=True)
+
     # ------------------------------------------------------------------
     # Armado de las filas exportables (UNA fila por muestra, igual que PT)
     # ------------------------------------------------------------------
@@ -775,6 +1085,17 @@ elif st.session_state.step == 8:
                 return f"No conforme: {comentario}"
         return valor
 
+    def valor_inocuidad(clave, nivel, i):
+        if clave not in controles_activos:
+            return "No aplica"
+        key = f"inocu_{clave}" if nivel == "lote" else f"inocu_{clave}_{i}"
+        valor = st.session_state.respuestas_inocuidad.get(key, "Conforme")
+        if valor == "No conforme":
+            accion = st.session_state.comentarios_inocuidad.get(clave, "").strip()
+            if accion:
+                return f"No conforme: {accion}"
+        return valor
+
     filas_export = []
     for i in range(n):
         filas_export.append([
@@ -787,7 +1108,11 @@ elif st.session_state.step == 8:
             fila["componente"],
             fila["actividad"],
         ] + [
-            valor_muestra(clave, i) for clave, _ in ALL_PARAM_DEFS
+            valor_muestra(clave, i) for clave, _ in PARAMS_ANTES_INOCUIDAD
+        ] + [
+            valor_inocuidad(clave, nivel, i) for clave, _, _, _, nivel in INOCUIDAD_DEFS
+        ] + [
+            valor_muestra("observacion", i),
         ] + [
             st.session_state.conclusion,
             iniciales(st.session_state.responsable),

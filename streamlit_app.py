@@ -275,6 +275,63 @@ def nombre_proceso_termico(criterio: str) -> str:
     return "cocción"
 
 
+# ----------------------------------------------------------------------------
+# EQUIPOS DE MEDICIÓN (solo BALANZAS y TERMÓMETROS usados en la inspección de procesos (PI))
+# (codigo, nombre, ubicación). Se muestran en el paso 6 y se guarda el CÓDIGO.
+# Para las balanzas que no tienen código de inventario se usa la etiqueta del equipo
+# (ej. "CLD-02"). Fuera de esta lista quedan a propósito: balanzas de dosimetría,
+# cocina y almacén, y otros equipos (luxómetro, termohigrómetro, datalogger, pesas patrón).
+# Para agregar/quitar un equipo basta editar estas listas.
+# ----------------------------------------------------------------------------
+BALANZAS_PI = [
+    ("SFBA-001", "BALANZA BA-001 OHAUS", "SALA DE FORMADO"),
+    ("SFBA-002", "BALANZA PR-02 OHAUS", "SALA DE FORMADO"),
+    ("SFBA-003", "BALANZA PR-03 SUPER-SS", "SALA DE FORMADO"),
+    ("SFBA-005", "BALANZA PR-05 JADEVER", "SALA DE FORMADO"),
+    ("SDBA-001", "BALANZA RE-01 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-002", "BALANZA RE-02 (SC) SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-003", "BALANZA RE-03 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-004", "BALANZA RE-06 OHAUS", "SALA DE DECORADO"),
+    ("SDBA-005", "BALANZA RE-08 JADEVER", "MUFFIN"),
+    ("SDBA-006", "BALANZA RE-09 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-007", "BALANZA RE-10 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-008", "BALANZA RE-11 SUPER-SS", "PROCESOS"),
+    ("SDBA-009", "BALANZA RE-12 JADEVER", "SALA DE DECORADO"),
+    ("SDBA-010", "BALANZA RE-13 SUPER-SS", "SALA DE DECORADO"),
+    ("CLD-01", "BALANZA CLD-01 TRUPER", "CALIDAD"),
+    ("CLD-02", "BALANZA CLD-02 TRUPER", "CALIDAD"),
+    ("CA-02", "BALANZA CA-02 PRECISA", "PRODUCCION"),
+    ("RE-05", "BALANZA RE-05 JADEVER", "GALLETON"),
+    ("PRO-13", "BALANZA PRO-13 SUPER-SS", "CHEESE CAKE"),
+    ("PRO-14", "BALANZA PRO-14 SUPER-SS", "PROCESOS"),
+    ("PRO-11", "BALANZA PRO-11 SUPER-SS", "PROCESOS"),
+    ("DEC-01", "BALANZA DEC-01 SUPER-SS", "PROCESOS"),
+    ("RE04", "BALANZA RE04", "PROCESOS"),
+    ("PRO15", "BALANZA PRO15", "PROCESOS"),
+    ("PRO03", "BALANZA PRO03", "PROCESOS"),
+    ("EMP 01", "BALANZA EMP 01", "PROCESOS"),
+    ("REL-02", "BALANZA REL-02", "PROCESOS"),
+    ("PRO10", "BALANZA PRO10", "PROCESOS"),
+]
+
+TERMOMETROS_PI = [
+    ("TER-003", "TERMÓMETRO INFRARROJO TER-003", "CALIDAD"),
+    ("TER-004", "TERMÓMETRO INFRARROJO TER-004", "CALIDAD"),
+    ("TER-005", "TERMÓMETRO INFRARROJO TER-005", "CALIDAD"),
+    ("TER-006", "TERMÓMETRO INFRARROJO TER-006", "ALMACEN"),
+    ("M1 CAL", "TERMÓMETRO DIGITAL M1 CAL", "CALIDAD"),
+    ("M3CAL", "TERMÓMETRO DIGITAL M3CAL", "CALIDAD"),
+    ("M4CAL", "TERMÓMETRO DIGITAL M4CAL", "CALIDAD"),
+    ("PT O1", "TERMÓMETRO DIGITAL PT O1 (patrón)", "CALIDAD - PATRÓN"),
+]
+
+
+def etiqueta_equipo(eq) -> str:
+    """Texto que ve el usuario en la lista: CÓDIGO · NOMBRE · UBICACIÓN."""
+    codigo, nombre, ubicacion = eq
+    return f"{codigo}  ·  {nombre}  ·  {ubicacion}"
+
+
 # Encabezados EXACTOS de la plantilla — UNA FILA POR MUESTRA (igual que PT).
 # Orden del plan: ... Estado del material -> CONTROL INOCUIDAD (5) -> Observación/Corrección.
 PARAMS_ANTES_INOCUIDAD = [d for d in ALL_PARAM_DEFS if d[0] != "observacion"]
@@ -283,6 +340,7 @@ HEADERS_EXPORT = (
     + [label for _, label in PARAMS_ANTES_INOCUIDAD]
     + [h for _, _, h, _, _ in INOCUIDAD_DEFS]
     + ["Observación/Corrección"]
+    + ["Código de Balanza", "Código de Termómetro"]
     + ["Conclusión", "Iniciales"]
 )
 
@@ -830,10 +888,74 @@ elif st.session_state.step == 5:
             st.rerun()
 
 # ============================================================================
-# PASO 6 - REGISTRO DE PARÁMETROS POR MUESTRA
+# PASO 6 - EQUIPOS DE MEDICIÓN (balanza y termómetro) - solo los que aplican a la actividad
 # ============================================================================
 elif st.session_state.step == 6:
-    st.header("5️⃣ Registro de parámetros por muestra")
+    st.header("5️⃣ Equipos de medición utilizados")
+
+    fila = st.session_state.fila_actividad
+    criterios_in = st.session_state.get("inocuidad_actividad", {})
+    # Balanza: solo si la actividad pesa (parámetro Peso). Termómetro: si mide temperatura
+    # o tiene un control de inocuidad térmico (horneado/cocción, enfriado, hermeticidad).
+    aplica_balanza = campo_aplica(fila["peso"])
+    aplica_termometro = campo_aplica(fila["temperatura"]) or any(
+        c in criterios_in for c in ("horneado", "enfriado", "hermeticidad")
+    )
+
+    st.markdown(f"**Producto:** {st.session_state.producto} &nbsp;|&nbsp; "
+                f"**Actividad:** {fila['actividad']} — {fila['componente']}")
+
+    bal_sel = ter_sel = None
+    if not aplica_balanza and not aplica_termometro:
+        st.info("Esta actividad no requiere balanza ni termómetro. Puedes continuar.")
+    else:
+        st.caption("Selecciona los equipos que usaste en esta actividad. Se guardará el código de "
+                   "cada equipo en el historial. Solo se piden los equipos que aplican.")
+
+    if aplica_balanza:
+        ubicaciones = sorted({u for _, _, u in BALANZAS_PI})
+        filtro_ub = st.selectbox("Filtrar balanzas por ubicación (opcional)", ["Todas"] + ubicaciones)
+        balanzas_op = [b for b in BALANZAS_PI if filtro_ub == "Todas" or b[2] == filtro_ub]
+        bal_previa = st.session_state.get("balanza_sel")
+        idx_bal = next((i for i, b in enumerate(balanzas_op) if b[0] == bal_previa), None)
+        bal_sel = st.selectbox(
+            "Balanza utilizada", balanzas_op, index=idx_bal,
+            format_func=etiqueta_equipo, placeholder="Selecciona la balanza...",
+            key=f"widget_balanza_{filtro_ub}",
+        )
+    elif aplica_termometro:
+        st.caption("⚖️ Balanza: no aplica (la actividad no registra peso).")
+
+    if aplica_termometro:
+        ter_previo = st.session_state.get("termometro_sel")
+        idx_ter = next((i for i, t in enumerate(TERMOMETROS_PI) if t[0] == ter_previo), None)
+        ter_sel = st.selectbox(
+            "Termómetro utilizado", TERMOMETROS_PI, index=idx_ter,
+            format_func=etiqueta_equipo, placeholder="Selecciona el termómetro...",
+            key="widget_termometro",
+        )
+    elif aplica_balanza:
+        st.caption("🌡️ Termómetro: no aplica (la actividad no registra temperatura).")
+
+    listo = (not aplica_balanza or bal_sel is not None) and (not aplica_termometro or ter_sel is not None)
+    if not listo:
+        st.caption("⚠️ Selecciona los equipos indicados para continuar.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary", disabled=not listo):
+            st.session_state.balanza_sel = bal_sel[0] if bal_sel else "No aplica"
+            st.session_state.termometro_sel = ter_sel[0] if ter_sel else "No aplica"
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 7 - REGISTRO DE PARÁMETROS POR MUESTRA
+# ============================================================================
+elif st.session_state.step == 7:
+    st.header("6️⃣ Registro de parámetros por muestra")
 
     fila = st.session_state.fila_actividad
     n = st.session_state.n_muestras
@@ -912,10 +1034,10 @@ elif st.session_state.step == 6:
             st.rerun()
 
 # ============================================================================
-# PASO 7 - CONTROL DE INOCUIDAD (MA-PL-019) - solo los controles que aplican a la actividad
+# PASO 8 - CONTROL DE INOCUIDAD (MA-PL-019) - solo los controles que aplican a la actividad
 # ============================================================================
-elif st.session_state.step == 7:
-    st.header("6️⃣ Control de inocuidad")
+elif st.session_state.step == 8:
+    st.header("7️⃣ Control de inocuidad")
 
     fila = st.session_state.fila_actividad
     n = st.session_state.n_muestras
@@ -977,10 +1099,10 @@ elif st.session_state.step == 7:
             st.rerun()
 
 # ============================================================================
-# PASO 8 - CONCLUSIÓN DEL REGISTRO
+# PASO 9 - CONCLUSIÓN DEL REGISTRO
 # ============================================================================
-elif st.session_state.step == 8:
-    st.header("7️⃣ Conclusión del registro")
+elif st.session_state.step == 9:
+    st.header("8️⃣ Conclusión del registro")
 
     nc_in = [d[1] for d in INOCUIDAD_DEFS
              if d[0] in st.session_state.get("controles_inocuidad", [])
@@ -1007,10 +1129,10 @@ elif st.session_state.step == 8:
             st.rerun()
 
 # ============================================================================
-# PASO 9 - RESUMEN FINAL Y EXPORTACIÓN
+# PASO 10 - RESUMEN FINAL Y EXPORTACIÓN
 # ============================================================================
-elif st.session_state.step == 9:
-    st.header("8️⃣ Resumen final")
+elif st.session_state.step == 10:
+    st.header("9️⃣ Resumen final")
 
     fila = st.session_state.fila_actividad
     n = st.session_state.n_muestras
@@ -1024,7 +1146,7 @@ elif st.session_state.step == 9:
                 "Equipo de calidad", "Turno", "Fecha de producción", "Cliente", "Área",
                 "Línea HACCP", "Producto", "Componente", "Actividad",
                 "¿Aplica batch?", "Tamaño de batch", "Letra código muestreo",
-                "N° de muestras", "Conclusión",
+                "N° de muestras", "Balanza utilizada", "Termómetro utilizado", "Conclusión",
             ],
             "Valor": [
                 st.session_state.responsable, st.session_state.turno,
@@ -1035,7 +1157,8 @@ elif st.session_state.step == 9:
                 st.session_state.aplica_batch,
                 st.session_state.batch_size if st.session_state.batch_size else "No aplica",
                 st.session_state.letra_codigo if st.session_state.letra_codigo else "No aplica",
-                n, st.session_state.conclusion,
+                n, st.session_state.balanza_sel, st.session_state.termometro_sel,
+                st.session_state.conclusion,
             ],
         }
     )
@@ -1113,6 +1236,9 @@ elif st.session_state.step == 9:
             valor_inocuidad(clave, nivel, i) for clave, _, _, _, nivel in INOCUIDAD_DEFS
         ] + [
             valor_muestra("observacion", i),
+        ] + [
+            st.session_state.balanza_sel,      # Código de Balanza
+            st.session_state.termometro_sel,   # Código de Termómetro
         ] + [
             st.session_state.conclusion,
             iniciales(st.session_state.responsable),

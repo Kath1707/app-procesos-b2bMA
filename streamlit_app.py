@@ -345,6 +345,17 @@ HEADERS_EXPORT = (
 )
 
 
+
+def _es_marcador_footer(texto) -> bool:
+    """True si la celda es el pie de firma de la plantilla ('V°B° Jefe de Calidad',
+    'V°B° Supervisor de Calidad', 'VB° Jefe de Calidad'...). Se ignoran °, º, espacios y
+    mayúsculas para que un cambio menor de texto en la plantilla no rompa la detección."""
+    t = str(texto).upper()
+    for ch in ("°", "º", " ", "\n"):
+        t = t.replace(ch, "")
+    return t.startswith("VB") and "CALIDAD" in t
+
+
 def iniciales(nombre_completo: str) -> str:
     partes = nombre_completo.strip().split()
     if len(partes) < 2:
@@ -535,11 +546,11 @@ def get_or_create_month_spreadsheet_id(drive, root_folder_id: str, fecha: date) 
 def _encontrar_fila_footer(ws) -> int | None:
     valores = ws.get_all_values()
     for idx, fila in enumerate(valores, start=1):
-        if fila and fila[0].strip().upper().startswith(FOOTER_MARCA.upper()):
+        if fila and _es_marcador_footer(fila[0]):
             return idx
         # el marcador puede no estar en la columna A si se corrió por el merge
         for celda in fila:
-            if celda.strip().upper().startswith(FOOTER_MARCA.upper()):
+            if _es_marcador_footer(celda):
                 return idx
     return None
 
@@ -585,7 +596,7 @@ def _leer_combinaciones_de_hoja(ws) -> set:
 
     combinaciones = set()
     for fila in valores[FILA_ENCABEZADO_PLANTILLA:]:
-        if fila and fila[0].strip().upper().startswith(FOOTER_MARCA.upper()):
+        if fila and _es_marcador_footer(fila[0]):
             break
         if len(fila) > max(indices.values()):
             combo = (
@@ -656,7 +667,7 @@ def guardar_en_google_sheets(filas: list) -> tuple:
 
         fila_footer = _encontrar_fila_footer(ws)
         if fila_footer is None:
-            ws.append_rows(filas)
+            ws.append_rows(filas, table_range="A1")  # respaldo: siempre desde la columna A
         else:
             ws.insert_rows(filas, row=fila_footer)
 

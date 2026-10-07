@@ -254,7 +254,122 @@ INOCUIDAD_PI = {
         'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
         'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
     },
+    ('GALLETA DECORADA PUMPKIN', 'MASA GALLETA', 'CORTADO (CON CORTADORES DE GALLETA)'): {
+        'desinfeccion': 'Salmonella · Concentración: 200 ppm · Tiempo: 3 min · Frecuencia: cada que se procesa o casca huevo',
+        'horneado': 'T° cocción: 130°C · Tiempo: 14 min · Frecuencia: cada que hornea',
+    },
+    ('GALLETA DECORADA PUMPKIN', 'GALLETA PUMPKIN', 'DECORADO/ENFRIADO'): {
+        'enfriado': 'T°: ≤23°C · Frecuencia: cada que se produzca',
+        'hermeticidad': 'T°: ambiente ≤25°C · Frecuencia: cada que se envase · Cantidad: según batch y tabla muestreo',
+    },
 }
+
+
+# ----------------------------------------------------------------------------
+# SPECS HARDCODEADAS (productos/actividades que aún no están en el Excel de PI)
+# Agregar aquí nuevas filas sin tocar el Excel base.
+# Estructura: mismas claves que las columnas que lee load_specs().
+# ----------------------------------------------------------------------------
+SPECS_EXTRA_PI = [
+    # ---------- GALLETA DECORADA PUMPKIN ----------
+    {
+        "producto": "GALLETA DECORADA PUMPKIN",
+        "linea_produccion": "LINEA GALLETAS",
+        "linea_haccp": "LINEA GALLETAS",
+        "componente": "MASA GALLETA",
+        "actividad": "LAMINADO DE LA MASA",
+        "tipo": "PI",
+        "peso": "-",
+        "diametro": "-",
+        "altura": "0.4 - 0.6 cm",
+        "temperatura": "AMBIENTE",
+        "tamizado": "LIBRE DE MATERIAL EXTRAÑO",
+        "tiempo_mezcla": None,
+        "decorado": None,
+        "brix": None,
+        "organolepticas": (
+            "Apariencia: Masa laminada uniforme\n"
+            "Sabor: A vainilla, dulce\n"
+            "Olor: A vainilla\n"
+            "Color: Naranja\n"
+            "Textura: Homogénea, suave"
+        ),
+        "estado_material": "RODILLO/MESA LIMPIA",
+        "observacion": None,
+    },
+    {
+        "producto": "GALLETA DECORADA PUMPKIN",
+        "linea_produccion": "LINEA GALLETAS",
+        "linea_haccp": "LINEA GALLETAS",
+        "componente": "MASA GALLETA",
+        "actividad": "CORTADO (CON CORTADORES DE GALLETA)",
+        "tipo": "PI",
+        "peso": "29 +/- 1 g",
+        "diametro": "-",
+        "altura": "0.4 - 0.6 cm",
+        "temperatura": "AMBIENTE",
+        "tamizado": "LIBRE DE MATERIAL EXTRAÑO",
+        "tiempo_mezcla": None,
+        "decorado": None,
+        "brix": None,
+        "organolepticas": (
+            "Apariencia: Forma de calabaza bien definida\n"
+            "Sabor: A vainilla, dulce\n"
+            "Olor: A vainilla\n"
+            "Color: Naranja\n"
+            "Textura: Homogénea, sin grietas"
+        ),
+        "estado_material": "CORTADORES LIMPIOS, MESA/CORTADORA LIMPIA",
+        "observacion": None,
+    },
+    {
+        "producto": "GALLETA DECORADA PUMPKIN",
+        "linea_produccion": "LINEA GALLETAS",
+        "linea_haccp": "LINEA GALLETAS",
+        "componente": "GALLETA PUMPKIN",
+        "actividad": "DECORADO/ENFRIADO",
+        "tipo": "PI",
+        "peso": "27 +/- 1 g",
+        "diametro": "-",
+        "altura": "0.5 - 0.8 cm",
+        "temperatura": "<25 °C",
+        "tamizado": None,
+        "tiempo_mezcla": None,
+        "decorado": "PARTES BLANCAS Y PUNTO VERDE",
+        "brix": None,
+        "organolepticas": (
+            "Apariencia: Galleta en forma de calabaza\n"
+            "Sabor: A vainilla, dulce\n"
+            "Olor: A vainilla, dulce\n"
+            "Color: Naranja con partes blancas y punto verde\n"
+            "Textura: Crocante y suave"
+        ),
+        "estado_material": "MANGA LIMPIA, SIN ROTURAS NI CONTAMINACIÓN",
+        "observacion": None,
+    },
+]
+
+
+def _inyectar_specs_hardcoded_pi(df: pd.DataFrame) -> pd.DataFrame:
+    """Añade las filas de SPECS_EXTRA_PI al DataFrame de specs cargado del Excel.
+    Si una combinación (producto, componente, actividad) ya existe en el Excel,
+    no se duplica."""
+    combos_existentes = set(
+        zip(
+            df["producto"].str.upper(),
+            df["componente"].str.upper(),
+            df["actividad"].str.upper(),
+        )
+    )
+    filas_nuevas = [
+        r for r in SPECS_EXTRA_PI
+        if (r["producto"].upper(), r["componente"].upper(), r["actividad"].upper())
+        not in combos_existentes
+    ]
+    if not filas_nuevas:
+        return df
+    df_extra = pd.DataFrame(filas_nuevas)
+    return pd.concat([df, df_extra], ignore_index=True)
 
 
 def _norm_clave(x) -> str:
@@ -695,7 +810,7 @@ def go_back():
 
 
 excel_bytes = get_excel_bytes()
-specs_df = load_specs(excel_bytes)
+specs_df = _inyectar_specs_hardcoded_pi(load_specs(excel_bytes))
 
 # ============================================================================
 # PASO 1 - PORTADA
